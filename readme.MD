@@ -81,7 +81,7 @@ the optimization process for a surf ramp and player follows these steps:
 - MAX_OPTIMIZATION_ITERATIONS: maximum number of iterations for the optimization process
 - COLLISION_DETECTION_RESOLUTION: resolution of the collision detection grid
 
-- TODO: dynamically adjusting optimization parameters based on server performance and different game states
+TODO: dynamically adjusting optimization parameters based on server performance and different game states
 
 ## general todo
 
