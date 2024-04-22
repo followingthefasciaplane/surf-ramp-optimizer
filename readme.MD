@@ -93,3 +93,4 @@ the optimization process for a surf ramp and player follows these steps:
 - further profiling and optimization for potentially expensive computations (currently utilizes SIMD instructions and GPU acceleration for performance and scalability)
 - dynamically adjusting optimization parameters based on server performance and different game states
 - parallel processing to perform CPU intensive complex calculations, such as path optimization or physics simulations with multiple cores 
+- implement extensive logging 
