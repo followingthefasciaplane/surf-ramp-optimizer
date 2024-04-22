@@ -1,9 +1,9 @@
 #include "surf_ramp_optimizer.h
-//#include <IPlayerHelpers.h>
+//include <IPlayerHelpers.h>
 #include <immintrin.h>
 #include <limits>
 #include <igameevents.h>
-//#include <ILogger.h>
+//include <ILogger.h>
 #include <algorithm>
 
 SurfRampOptimizer g_SurfRampOptimizer;
