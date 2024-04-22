@@ -52,8 +52,8 @@ normal: the surface normal of the ramp
 length: the length of the ramp  
 width: the width of the ramp  
 
-TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps`  
-TODO: implement functionality to easily create and destroy surf_ramp entities
+- TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps`  
+- TODO: implement functionality to easily create and destroy surf_ramp entities
 
 ## optimization process
 
@@ -64,14 +64,14 @@ the optimization process for a surf ramp and player follows these steps:
 3. the optimized path is stored in the `m_OptimizedPath` member variable of the `CBrachistochroneOptimizer` instance
 4. the `Update` function is called periodically to adjust the path in real-time based on changing game conditions and player actions
 5. if the player deviates significantly from the optimized path, the `RecalibratePath` function of the `PlayerMovementTracking` class is called to find a new path using the A* algorithm.
-6. TODO: implement visualization with tempents or something
-7. TODO: implement functionality to search, view and edit the optimized path data for a specific player and ramp
+- TODO: implement visualization with tempents or something
+- TODO: implement functionality to search, view and edit the optimized path data for a specific player and ramp
 
 ## handling ramp collisions:
 
 1. uses the GJK algorithm and bounding volume hierarchy (BVH) for collision detection  
 2. automatically handles collisions between players and surf_ramp entities  
-3. TODO: perform additional collision checks and handle custom collision scenarios utilizing the collision detection functions provided in the CollisionDetection namespace  
+- TODO: perform additional collision checks and handle custom collision scenarios utilizing the collision detection functions provided in the CollisionDetection namespace  
 
 ## optimization parameters
 
