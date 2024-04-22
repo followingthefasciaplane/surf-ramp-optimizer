@@ -108,7 +108,8 @@ void SurfRampOptimizer::SDK_OnAllLoaded() {
 
     CollisionDetection::Initialize();
 
-    smutils->LogMessage(myself, "SurfRampOptimizer is loaded");
+    g_ServerTickrate = gpGlobals->tickRate;
+    smutils->LogMessage(myself, "SurfRampOptimizer is loaded (Server Tickrate: %.2f)", g_ServerTickrate);
 }
 
 bool SurfRampOptimizer::QueryRunning(char* error, size_t maxlength) {
@@ -166,10 +167,12 @@ void SurfRampOptimizer::OnEntityDestroyed(CBaseEntity* pEntity) {
 void Optimize(CBasePlayer* pPlayer, const Ramp& ramp) {
     Vector pos = pPlayer->GetAbsOrigin(), vel = pPlayer->GetAbsVelocity();
 
+    float tickInterval = 1.0f / g_ServerTickrate;
+
     for (auto bc : g_SurfRamps) {
         if (bc->GetRamp() == ramp) {
-            std::vector<Vector> points = bc->Optimize(pos, vel, gpGlobals->tickInterval);
-            bc->Update(pos, vel, pPlayer->GetAbsVelocity() - vel);
+            std::vector<Vector> points = bc->Optimize(pos, vel, tickInterval);
+            bc->Update(pos, vel, pPlayer->GetAbsVelocity() - vel, tickInterval);
             break;
         }
     }
@@ -427,10 +430,11 @@ PlayerMovementTracking::PlayerMovementTracking(float maxDeviationDistance, size_
 
 PlayerMovementTracking::~PlayerMovementTracking() {}
 
-void PlayerMovementTracking::UpdatePlayerState(const Vector& position, const Vector& velocity, const Vector& acceleration) {
+void PlayerMovementTracking::UpdatePlayerState(const Vector& position, const Vector& velocity, const Vector& acceleration, float tickInterval) {
     m_positions.push_back(position);
     m_velocities.push_back(velocity);
     m_accelerations.push_back(acceleration);
+    m_timeIntervals.push_back(tickInterval);
 }
 
 Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const {
@@ -438,11 +442,13 @@ Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const {
         return Vector();
     }
 
-    Vector position = m_positions.back();
-    Vector velocity = m_velocities.back();
-    Vector acceleration = m_accelerations.back();
+    size_t n = m_positions.size() - 1;
+    Vector position = m_positions[n];
+    Vector velocity = m_velocities[n];
+    Vector acceleration = m_accelerations[n];
+    float timeInterval = m_timeIntervals[n];
 
-    return position + velocity * timeStep + 0.5f * acceleration * timeStep * timeStep;
+    return position + velocity * timeInterval + 0.5f * acceleration * timeInterval * timeInterval;
 }
 
 bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path) const {
@@ -461,7 +467,7 @@ bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path
     return minDistance > m_maxDeviationDistance;
 }
 
-void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer) {
+void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer, float tickInterval) {
     if (HasDeviatedFromPath(currentPath)) {
         Vector currentPos = m_positions.back();
         Vector currentVel = m_velocities.back();
@@ -471,9 +477,7 @@ void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentP
 
         if (!newPath.empty()) {
             optimizer.m_OptimizedPath = newPath;
-
-            float tickrate = gpGlobals->tickInterval;
-            optimizer.m_OptimizedPath = optimizer.Optimize(currentPos, currentVel, tickrate);
+            optimizer.m_OptimizedPath = optimizer.Optimize(currentPos, currentVel, tickInterval);
         }
     }
 }
@@ -549,11 +553,9 @@ CBrachistochroneOptimizer::CBrachistochroneOptimizer(const Ramp& ramp, CBaseEnti
     m_Gravity = gpGlobals->gravity;
 }
 
-CBrachistochroneOptimizer::~CBrachistochroneOptimizer() {}
-
-std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickrate) {
+std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickInterval) {
     float pathTime = NumericalMethods::CalculateBrachistochronePathTime(startPos, m_Ramp.endPoint, m_Gravity);
-    float timeStep = tickrate;
+    float timeStep = tickInterval;
 
     Vector prevPos = startPos;
     Vector currVel = startVel;
@@ -581,7 +583,6 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
         if (IsPathValid(pos)) {
             m_OptimizedPath.push_back(pos);
             prevPos = pos;
-            Update(pos, currVel, currAccel);
         }
         else {
             break;
@@ -597,20 +598,20 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
     return m_OptimizedPath;
 }
 
-void CBrachistochroneOptimizer::Update(const Vector& playerPos, const Vector& playerVel, const Vector& playerAccel) {
-    m_PlayerTracker.UpdatePlayerState(playerPos, playerVel, playerAccel);
+void CBrachistochroneOptimizer::Update(const Vector& playerPos, const Vector& playerVel, const Vector& playerAccel, float tickInterval) {
+    m_PlayerTracker.UpdatePlayerState(playerPos, playerVel, playerAccel, tickInterval);
 
     std::vector<Ramp> ramps;
     for (auto it = g_RampCache.begin(); it != g_RampCache.end(); ++it) {
         ramps.push_back(it->second);
     }
 
-    m_PlayerTracker.RecalibratePath(m_OptimizedPath, ramps, *this);
+    m_PlayerTracker.RecalibratePath(m_OptimizedPath, ramps, *this, tickInterval);
 
     if (m_PlayerTracker.HasDeviatedFromPath(m_OptimizedPath)) {
-        Vector estimatedPos = m_PlayerTracker.EstimatePlayerPosition(gpGlobals->tickInterval);
+        Vector estimatedPos = m_PlayerTracker.EstimatePlayerPosition(tickInterval);
         Vector estimatedVel = playerVel;
-        m_OptimizedPath = Optimize(estimatedPos, estimatedVel, gpGlobals->tickInterval);
+        m_OptimizedPath = Optimize(estimatedPos, estimatedVel, tickInterval);
     }
 }
 
