@@ -14,7 +14,7 @@ this is an experimental, work-in-progress project that will eventually calculate
 - caching mechanisms for frequently used data and calculations
 - thread-safe synchronization using mutexes for accessing shared data structures
 
-## classes
+## structure
 
 - `SurfRampOptimizer`: the main extension class that handles initialization, entity creation/destruction, and overall management of the optimization process.
 - `CBrachistochroneOptimizer`: handles the brachistochrone curve optimization for a specific surf ramp and player.
