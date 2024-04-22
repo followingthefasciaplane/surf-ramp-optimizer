@@ -46,11 +46,17 @@ length "100"
 width "50"  
 ```  
   
-startpoint: starting position of the ramp  
-endpoint: the ending position of the ramp  
+startpoint: starting position of the ramp 
+endpoint: the ending position of the ramp 
 normal: the surface normal of the ramp  
 length: the length of the ramp  
 width: the width of the ramp  
+
+- minExtents: this vector represents the minimum x, y, and z coordinates that the ramp occupies in the 3D space. it defines the lower boundary or corner of the ramp's bounding volume
+
+- maxExtents: same thing, but the opposite
+
+- extents are calculatd from ramp properties and used for collision detection
 
 - TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps`  
 - TODO: implement functionality to easily create and destroy surf_ramp entities
