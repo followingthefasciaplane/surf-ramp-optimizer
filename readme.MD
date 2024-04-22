@@ -1,6 +1,6 @@
 ## surf-pathfinder
 
-this is an experimental, work-in-progress project that will eventually calculate perfect routes along surf ramps, adjusting dynamically to game conditions and player actions, for usage in TAS creation.  
+this is an experimental, work-in-progress project that will eventually calculate perfect routes along surf ramps, adjusting dynamically to game conditions and player actions, for usage in TAS creation and as a guiding line for surfers.
 
 ## features
 
