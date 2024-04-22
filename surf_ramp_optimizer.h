@@ -1,16 +1,16 @@
 #pragma once
 
-//#include <ISDKTools.h>
-//#include <iplayerinfo.h>
-//#include <IForwardSys.h>
-//#include <vector>
+#include <ISDKTools.h>
+#include <iplayerinfo.h>
+#include <IForwardSys.h>
+#include <vector>
 #include <deque>
-//#include <unordered_map>
-//#include <mutex>
+#include <unordered_map>
+#include <mutex>
+#include <memory>
 #include <IKeyValues.h>
 #include <cstring>
 #include <cmath>
-//#include <fstream>
 
 struct Vector {
     float x, y, z, v, w, u;
@@ -105,16 +105,17 @@ public:
     PlayerMovementTracking(float maxDeviationDistance, size_t bufferCapacity = 100);
     ~PlayerMovementTracking();
 
-    void UpdatePlayerState(const Vector& position, const Vector& velocity, const Vector& acceleration);
+    void UpdatePlayerState(const Vector& position, const Vector& velocity, const Vector& acceleration, float tickInterval);
     Vector EstimatePlayerPosition(float timeStep) const;
     bool HasDeviatedFromPath(const std::vector<Vector>& path) const;
-    void RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer);
+    void RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer, float tickInterval);
 
 private:
     float m_maxDeviationDistance;
     std::deque<Vector> m_positions;
     std::deque<Vector> m_velocities;
     std::deque<Vector> m_accelerations;
+    std::deque<float> m_timeIntervals;
 };
 
 class BVHNode {
@@ -137,8 +138,8 @@ public:
     CBrachistochroneOptimizer(const Ramp& ramp, CBaseEntity* player);
     ~CBrachistochroneOptimizer();
 
-    std::vector<Vector> Optimize(const Vector& startPos, const Vector& startVel, float tickrate);
-    void Update(const Vector& playerPos, const Vector& playerVel, const Vector& playerAccel);
+    std::vector<Vector> Optimize(const Vector& startPos, const Vector& startVel, float tickInterval);
+    void Update(const Vector& playerPos, const Vector& playerVel, const Vector& playerAccel, float tickInterval);
 
     const Ramp& GetRamp() const;
     const std::vector<Vector>& GetPath() const;
@@ -152,7 +153,7 @@ private:
     float m_AirAccelerate;
     float m_Gravity;
     std::vector<Vector> m_OptimizedPath;
-    PlayerMovementTracking m_PlayerTracker;
+    std::unique_ptr<PlayerMovementTracking> m_PlayerTracker;
 
     friend class PlayerMovementTracking;
 };
@@ -177,11 +178,12 @@ private:
 
 extern SurfRampOptimizer g_SurfRampOptimizer;
 extern IForward* g_fwdOnStartTouchRamp;
+extern std::vector<std::unique_ptr<CBrachistochroneOptimizer>> g_SurfRamps;
 
 void FireOnStartTouchRampForward(CBaseEntity* pPlayer, CBaseEntity* pRamp);
 Ramp GetRampFromEntity(CBaseEntity* pEntity);
-void Optimize(CBasePlayer* pPlayer, const Ramp& ramp);
-void Predict(CBasePlayer* pPlayer);
+void Optimize(const CBasePlayer& pPlayer, const Ramp& ramp);
+void Predict(const CBasePlayer& pPlayer);
 
 namespace CollisionDetection {
     void Initialize();
@@ -201,7 +203,7 @@ namespace NumericalMethods {
     Vector CalculateGradient(const Vector& point, const Ramp& ramp, float gravity, float airAccelerate);
 
     float GaussianQuadrature(float a, float b, int n, float (*f)(float, void*), void* params);
-    float DormandPrince54(float t0, float tf, const Vector& y0, float (*f)(float, Vector, void*), void* params, float& h);
+    Vector DormandPrince54(float t0, float tf, const Vector& y0, Vector (*f)(float, Vector, void*), void* params, float& h);
 }
 
 namespace MathUtils {

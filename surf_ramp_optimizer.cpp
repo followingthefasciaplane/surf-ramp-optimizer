@@ -5,6 +5,7 @@
 #include <igameevents.h>
 //#include <ILogger.h>
 #include <algorithm>
+#include <memory>
 
 SurfRampOptimizer g_SurfRampOptimizer;
 SMEXT_LINK(&g_SurfRampOptimizer);
@@ -22,7 +23,8 @@ IGameMovement* g_pGameMovement = nullptr;
 IPlayerInfoManager* playerinfomngr = nullptr;
 
 std::mutex g_SurfRampsMutex;
-std::vector<CBrachistochroneOptimizer*> g_SurfRamps;
+std::mutex g_RampCacheMutex;
+std::vector<std::unique_ptr<CBrachistochroneOptimizer>> g_SurfRamps;
 BVHNode* g_BVHRoot = nullptr;
 std::unordered_map<CBaseEntity*, Ramp> g_RampCache;
 
@@ -135,9 +137,27 @@ static void OnStartTouch(CBaseEntity* pOther) {
     if (pOther->GetClassName() == "surf_ramp") {
         FireOnStartTouchRampForward(pOther, gameents->BaseEntityToEdict(reinterpret_cast<CBaseEntity*>(this)));
 
-        Ramp ramp = GetRampFromEntity(this);
-        CBasePlayer* pPlayer = static_cast<CBasePlayer*>(pOther);
-        Optimize(pPlayer, ramp);
+        Ramp ramp;
+        {
+            std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+            auto it = g_RampCache.find(this);
+            if (it != g_RampCache.end()) {
+                ramp = it->second;
+            }
+        }
+
+        if (ramp.startPoint.Length() > 0) {
+            CBasePlayer* pPlayer = static_cast<CBasePlayer*>(pOther);
+            Optimize(pPlayer, ramp);
+        }
+
+        for (const auto& bc : g_SurfRamps) {
+            if (bc->GetRamp() == ramp) {
+                std::vector<Vector> points = bc->Optimize(pos, vel, tickInterval);
+                bc->Update(pos, vel, pOther->GetAbsVelocity() - vel, tickInterval);
+                break;
+            }
+        }
     }
 }
 
@@ -146,30 +166,34 @@ void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classn
         std::lock_guard<std::mutex> lock(g_SurfRampsMutex);
         pEntity->SetTouch(OnStartTouch);
         Ramp ramp = GetRampFromEntity(pEntity);
-        g_SurfRamps.push_back(new CBrachistochroneOptimizer(ramp, nullptr));
+        
+        {
+            std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+            g_RampCache[pEntity] = ramp;
+        }
+        
+        g_SurfRamps.push_back(std::make_unique<CBrachistochroneOptimizer>(ramp, nullptr));
         CollisionDetection::InsertRamp(&ramp);
     }
 }
 
 void SurfRampOptimizer::OnEntityDestroyed(CBaseEntity* pEntity) {
     std::lock_guard<std::mutex> lock(g_SurfRampsMutex);
-    for (auto it = g_SurfRamps.begin(); it != g_SurfRamps.end(); ++it) {
-        if ((*it)->GetRamp().startPoint == pEntity->GetAbsOrigin()) {
-            delete* it;
-            g_SurfRamps.erase(it);
-            break;
-        }
-    }
+    g_SurfRamps.erase(std::remove_if(g_SurfRamps.begin(), g_SurfRamps.end(), [&](const auto& optimizer) {
+        return optimizer->GetRamp().startPoint == pEntity->GetAbsOrigin();
+    }), g_SurfRamps.end());
 
-    g_RampCache.erase(pEntity);
+    {
+        std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+        g_RampCache.erase(pEntity);
+    }
 }
 
 void Optimize(CBasePlayer* pPlayer, const Ramp& ramp) {
     Vector pos = pPlayer->GetAbsOrigin(), vel = pPlayer->GetAbsVelocity();
-
     float tickInterval = 1.0f / g_ServerTickrate;
 
-    for (auto bc : g_SurfRamps) {
+    for (const auto& bc : g_SurfRamps) {
         if (bc->GetRamp() == ramp) {
             std::vector<Vector> points = bc->Optimize(pos, vel, tickInterval);
             bc->Update(pos, vel, pPlayer->GetAbsVelocity() - vel, tickInterval);
@@ -181,7 +205,7 @@ void Optimize(CBasePlayer* pPlayer, const Ramp& ramp) {
 void Predict(CBasePlayer* pPlayer) {
     std::vector<Vector> path;
 
-    for (auto bc : g_SurfRamps) {
+    for (const auto& bc : g_SurfRamps) {
         if (bc->GetPlayer() == pPlayer) {
             path = bc->GetPath();
             break;
@@ -189,8 +213,11 @@ void Predict(CBasePlayer* pPlayer) {
     }
 
     std::vector<Ramp> ramps;
-    for (auto it = g_RampCache.begin(); it != g_RampCache.end(); ++it) {
-        ramps.push_back(it->second);
+    {
+        std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+        for (auto it = g_RampCache.begin(); it != g_RampCache.end(); ++it) {
+            ramps.push_back(it->second);
+        }
     }
 
     std::vector<Vector> predicted = Pathfinding::Pathfinding(pPlayer->GetAbsOrigin(), path.back(), ramps);
@@ -551,6 +578,10 @@ CBrachistochroneOptimizer::CBrachistochroneOptimizer(const Ramp& ramp, CBaseEnti
     : m_Ramp(ramp), m_Player(player), m_PlayerTracker(MAX_PLAYER_DIST_TO_PATH) {
     m_AirAccelerate = gpGlobals->airAccelerate;
     m_Gravity = gpGlobals->gravity;
+}
+
+CBrachistochroneOptimizer::~CBrachistochroneOptimizer() {
+    // No need for manual cleanup, smart pointers will handle it
 }
 
 std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickInterval) {
@@ -1281,6 +1312,14 @@ std::vector<Vector> Pathfinding::Pathfinding(const Vector& start, const Vector& 
 // Ramp utility methods
 
 Ramp GetRampFromEntity(CBaseEntity* pEntity) {
+    {
+        std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+        auto it = g_RampCache.find(pEntity);
+        if (it != g_RampCache.end()) {
+            return it->second;
+        }
+    }
+
     Vector startPoint = pEntity->GetAbsOrigin();
     Vector endPoint = startPoint + pEntity->GetForwardVector() * pEntity->GetValueForKey("length");
     Vector normal = pEntity->GetUpVector();
@@ -1298,6 +1337,11 @@ Ramp GetRampFromEntity(CBaseEntity* pEntity) {
     ramp.width = width;
     ramp.minExtents = minExtents;
     ramp.maxExtents = maxExtents;
+
+    {
+        std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+        g_RampCache[pEntity] = ramp;
+    }
 
     return ramp;
 }
