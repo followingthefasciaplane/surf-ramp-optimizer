@@ -56,10 +56,11 @@ width "50"
 
 - maxExtents: same thing, but the opposite
 
-- extents are calculated from ramp properties and used for collision detection
+extents are calculated from ramp properties and used for collision detection
 
-- TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps`  
-- TODO: implement functionality to easily create and destroy surf_ramp entities
+TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps`  
+
+TODO: implement functionality to easily create and destroy surf_ramp entities
 
 ## optimization process
 
