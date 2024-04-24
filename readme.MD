@@ -71,8 +71,10 @@ the optimization process for a surf ramp and player follows these steps:
 3. the optimized path is stored in the `m_OptimizedPath` member variable of the `CBrachistochroneOptimizer` instance
 4. the `Update` function is called periodically to adjust the path in real-time based on changing game conditions and player actions
 5. if the player deviates significantly from the optimized path, the `RecalibratePath` function of the `PlayerMovementTracking` class is called to find a new path using the A* algorithm.
-- TODO: implement visualization with tempents or something
-- TODO: implement functionality to search, view and edit the optimized path data for a specific player and ramp
+
+TODO: implement visualization with tempents or something
+
+TODO: implement functionality to search, view and edit the optimized path data for a specific player and ramp
 
 ## handling ramp collisions:
 
