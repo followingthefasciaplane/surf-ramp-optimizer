@@ -58,8 +58,7 @@ width "50"
 
 extents are calculated from ramp properties and used for collision detection
 
-TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps`  
-
+TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps`    
 TODO: implement functionality to easily create and destroy surf_ramp entities
 
 ## optimization process
