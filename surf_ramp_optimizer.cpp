@@ -716,14 +716,10 @@ bool CollisionDetection::GJKIntersection(const Ramp& ramp1, const Ramp& ramp2) {
     support[1] = SupportPoint(ramp1, ramp2, -direction);
 
 
-    //Vector simplex[3];
-    //simplex[0] = support[0];
-    //simplex[1] = support[1];
-    
-    Vector simplex[3] = { support[0], support[1], Vector() };
-    if (simplex[0].IsZero() || simplex[1].IsZero()){
-        return false;
-    }
+    Vector simplex[3];
+    simplex[0] = support[0];
+    simplex[1] = support[1];
+
     direction = MathUtils::CrossProduct(simplex[1] - simplex[0], -simplex[0]);
 
     int index = 2;
