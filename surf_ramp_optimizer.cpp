@@ -131,9 +131,9 @@ void FireOnStartTouchRampForward(CBaseEntity* pPlayer, CBaseEntity* pRamp) {
 }
 
 static void OnStartTouch(CBaseEntity* pOther) {
-    if (!pOther->IsPlayer())
+    if (!pOther || !pOther->IsPlayer()) {
         return;
-
+    }
     if (pOther->GetClassName() == "surf_ramp") {
         FireOnStartTouchRampForward(pOther, gameents->BaseEntityToEdict(reinterpret_cast<CBaseEntity*>(this)));
 
@@ -148,6 +148,9 @@ static void OnStartTouch(CBaseEntity* pOther) {
 
         if (ramp.startPoint.Length() > 0) {
             CBasePlayer* pPlayer = static_cast<CBasePlayer*>(pOther);
+            if (!pPlayer) {
+                return;
+            }
             Optimize(pPlayer, ramp);
         }
 
@@ -162,6 +165,10 @@ static void OnStartTouch(CBaseEntity* pOther) {
 }
 
 void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classname) {
+    if (!pEntity || !classname){
+        return;
+    }
+    
     if (std::string(classname) == "surf_ramp") {
         std::lock_guard<std::mutex> lock(g_SurfRampsMutex);
         pEntity->SetTouch(OnStartTouch);
@@ -449,14 +456,11 @@ float CBaseEntity::GetValueForKey(const char* key) const {
 
 // PlayerMovementTracking methods
 
-// PlayerMovementTracking methods
-
 PlayerMovementTracking::PlayerMovementTracking(float maxDeviationDistance, size_t bufferCapacity)
     : m_maxDeviationDistance(maxDeviationDistance),
     m_positions(bufferCapacity),
     m_velocities(bufferCapacity),
-    m_accelerations(bufferCapacity),
-    m_timeIntervals(bufferCapacity) {}
+    m_accelerations(bufferCapacity) {}
 
 PlayerMovementTracking::~PlayerMovementTracking() {}
 
@@ -465,13 +469,6 @@ void PlayerMovementTracking::UpdatePlayerState(const Vector& position, const Vec
     m_velocities.push_back(velocity);
     m_accelerations.push_back(acceleration);
     m_timeIntervals.push_back(tickInterval);
-
-    if (m_positions.size() > m_positions.capacity()) {
-        m_positions.pop_front();
-        m_velocities.pop_front();
-        m_accelerations.pop_front();
-        m_timeIntervals.pop_front();
-    }
 }
 
 Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const {
@@ -485,7 +482,7 @@ Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const {
     Vector acceleration = m_accelerations[n];
     float timeInterval = m_timeIntervals[n];
 
-    return position + velocity * timeStep + 0.5f * acceleration * timeStep * timeStep;
+    return position + velocity * timeInterval + 0.5f * acceleration * timeInterval * timeInterval;
 }
 
 bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path) const {
@@ -497,11 +494,11 @@ bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path
     float minDistance = std::numeric_limits<float>::max();
 
     for (const Vector& point : path) {
-        float distance = (playerPos - point).LengthSqr();
+        float distance = (playerPos - point).Length();
         minDistance = std::min(minDistance, distance);
     }
 
-    return std::sqrt(minDistance) > m_maxDeviationDistance;
+    return minDistance > m_maxDeviationDistance;
 }
 
 void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer, float tickInterval) {
@@ -513,6 +510,7 @@ void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentP
         std::vector<Vector> newPath = Pathfinding::Pathfinding(currentPos, goal, ramps);
 
         if (!newPath.empty()) {
+            optimizer.m_OptimizedPath = newPath;
             optimizer.m_OptimizedPath = optimizer.Optimize(currentPos, currentVel, tickInterval);
         }
     }
@@ -595,6 +593,11 @@ CBrachistochroneOptimizer::~CBrachistochroneOptimizer() {
 
 std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickInterval) {
     float pathTime = NumericalMethods::CalculateBrachistochronePathTime(startPos, m_Ramp.endPoint, m_Gravity);
+
+    if (pathTime <= 0.0f) {
+        return std::vector<Vector>(); //fix this
+    }
+
     float timeStep = tickInterval;
 
     Vector prevPos = startPos;
@@ -705,10 +708,10 @@ bool CollisionDetection::GJKIntersection(const Ramp& ramp1, const Ramp& ramp2) {
     support[0] = SupportPoint(ramp1, ramp2, direction);
     support[1] = SupportPoint(ramp1, ramp2, -direction);
 
-    Vector simplex[3];
-    simplex[0] = support[0];
-    simplex[1] = support[1];
-
+    Vector simplex[3] = { support[0], support[1], Vector() };
+    if (simplex[0].IsZero() || simplex[1].IsZero()){
+        return false;
+    }
     direction = MathUtils::CrossProduct(simplex[1] - simplex[0], -simplex[0]);
 
     int index = 2;
@@ -1065,10 +1068,16 @@ float MathUtils::AdaptiveGaussKronrod(float a, float b, float tolerance, int max
 // Optimization methods
 
 std::vector<Vector> Optimization::OptimizePath(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate) {
+    if (path.empty()) {
+        return std::vector<Vector>(); //todo
+    }
     return OptimizePathBFGS(path, ramp, gravity, airAccelerate);
 }
 
 std::vector<Vector> Optimization::OptimizePathConjugateGradient(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate) {
+    if (path.empty()) {
+        return std::vector<Vector>(); //todo
+    }
     const int maxIterations = 100;
     const float gradientTolerance = 1e-6f;
 
@@ -1158,7 +1167,7 @@ bool Optimization::SatisfiesWolfeConditions(const Vector& point, const Vector& d
     return false;
 }
 
-float Optimization::LineSearch(const Vector& point, const Vector& direction, const Ramp& ramp, float gravity, float airAccelerate) {
+std::pair<float, bool> Optimization::LineSearch(const Vector& point, const Vector& direction, const Ramp& ramp, float gravity, float airAccelerate) {
     const float c1 = 1e-4;
     const float c2 = 0.9;
     const float alpha_max = 1.0;
@@ -1170,7 +1179,7 @@ float Optimization::LineSearch(const Vector& point, const Vector& direction, con
 
     for (int i = 0; i < max_iterations; ++i) {
         if (SatisfiesWolfeConditions(point, direction, alpha, ramp, gravity, airAccelerate, c1, c2)) {
-            return alpha;
+            return std::make_pair(alpha, false); // return alpha and a flag indicating success
         }
 
         float alpha_new;
@@ -1191,7 +1200,7 @@ float Optimization::LineSearch(const Vector& point, const Vector& direction, con
         alpha = alpha_new;
     }
 
-    return alpha;
+    return std::make_pair(alpha, true); // return alpha and a flag indicating max iterations reached
 }
 
 float Optimization::CalculatePathCost(const Vector& point, const Ramp& ramp, float gravity, float airAccelerate) {
@@ -1232,7 +1241,7 @@ void Optimization::UpdateInverseHessian(Matrix& inverseHessian, const Vector& di
 
 // Pathfinding methods
 
-std::vector<Vector> Pathfinding::Pathfinding(const Vector& start, const Vector& goal, const std::vector<Ramp>& ramps) {
+std::optional<std::vector<Vector>> Pathfinding::Pathfinding(const Vector& start, const Vector& goal, const std::vector<Ramp>& ramps) {
     struct Node {
         Vector position;
         float g;
@@ -1248,7 +1257,7 @@ std::vector<Vector> Pathfinding::Pathfinding(const Vector& start, const Vector& 
 
     auto Heuristic = [](const Vector& a, const Vector& b) {
         return (a - b).Length();
-        };
+    };
 
     std::vector<Node*> openList;
     std::unordered_set<Node*> closedList;
@@ -1259,7 +1268,7 @@ std::vector<Vector> Pathfinding::Pathfinding(const Vector& start, const Vector& 
     while (!openList.empty()) {
         auto it = std::min_element(openList.begin(), openList.end(), [](const Node* a, const Node* b) {
             return a->F() < b->F();
-            });
+        });
 
         Node* currentNode = *it;
         openList.erase(it);
@@ -1273,6 +1282,7 @@ std::vector<Vector> Pathfinding::Pathfinding(const Vector& start, const Vector& 
             }
             std::reverse(path.begin(), path.end());
 
+            // clean up memory
             for (Node* node : openList) {
                 delete node;
             }
@@ -1287,12 +1297,12 @@ std::vector<Vector> Pathfinding::Pathfinding(const Vector& start, const Vector& 
             Vector rampEnd = ramp.endPoint;
             if (std::find_if(closedList.begin(), closedList.end(), [&](const Node* node) {
                 return node->position == rampEnd;
-                }) == closedList.end()) {
+            }) == closedList.end()) {
                 float g = currentNode->g + Heuristic(currentNode->position, rampEnd);
                 Node* neighbor = nullptr;
                 auto it = std::find_if(openList.begin(), openList.end(), [&](const Node* node) {
                     return node->position == rampEnd;
-                    });
+                });
                 if (it != openList.end()) {
                     neighbor = *it;
                     if (g < neighbor->g) {
@@ -1311,16 +1321,23 @@ std::vector<Vector> Pathfinding::Pathfinding(const Vector& start, const Vector& 
         }
     }
 
+    // Clean up memory
+    for (Node* node : openList) {
+        delete node;
+    }
     for (Node* node : closedList) {
         delete node;
     }
 
-    return std::vector<Vector>();
+    return std::nullopt;
 }
 
 // Ramp utility methods
 
 Ramp GetRampFromEntity(CBaseEntity* pEntity) {
+    if (!pEntity){
+        return Ramp();
+    }
     {
         std::lock_guard<std::mutex> lock(g_RampCacheMutex);
         auto it = g_RampCache.find(pEntity);
