@@ -449,11 +449,14 @@ float CBaseEntity::GetValueForKey(const char* key) const {
 
 // PlayerMovementTracking methods
 
+// PlayerMovementTracking methods
+
 PlayerMovementTracking::PlayerMovementTracking(float maxDeviationDistance, size_t bufferCapacity)
     : m_maxDeviationDistance(maxDeviationDistance),
     m_positions(bufferCapacity),
     m_velocities(bufferCapacity),
-    m_accelerations(bufferCapacity) {}
+    m_accelerations(bufferCapacity),
+    m_timeIntervals(bufferCapacity) {}
 
 PlayerMovementTracking::~PlayerMovementTracking() {}
 
@@ -462,6 +465,13 @@ void PlayerMovementTracking::UpdatePlayerState(const Vector& position, const Vec
     m_velocities.push_back(velocity);
     m_accelerations.push_back(acceleration);
     m_timeIntervals.push_back(tickInterval);
+
+    if (m_positions.size() > m_positions.capacity()) {
+        m_positions.pop_front();
+        m_velocities.pop_front();
+        m_accelerations.pop_front();
+        m_timeIntervals.pop_front();
+    }
 }
 
 Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const {
@@ -475,7 +485,7 @@ Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const {
     Vector acceleration = m_accelerations[n];
     float timeInterval = m_timeIntervals[n];
 
-    return position + velocity * timeInterval + 0.5f * acceleration * timeInterval * timeInterval;
+    return position + velocity * timeStep + 0.5f * acceleration * timeStep * timeStep;
 }
 
 bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path) const {
@@ -487,11 +497,11 @@ bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path
     float minDistance = std::numeric_limits<float>::max();
 
     for (const Vector& point : path) {
-        float distance = (playerPos - point).Length();
+        float distance = (playerPos - point).LengthSqr();
         minDistance = std::min(minDistance, distance);
     }
 
-    return minDistance > m_maxDeviationDistance;
+    return std::sqrt(minDistance) > m_maxDeviationDistance;
 }
 
 void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer, float tickInterval) {
@@ -503,7 +513,6 @@ void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentP
         std::vector<Vector> newPath = Pathfinding::Pathfinding(currentPos, goal, ramps);
 
         if (!newPath.empty()) {
-            optimizer.m_OptimizedPath = newPath;
             optimizer.m_OptimizedPath = optimizer.Optimize(currentPos, currentVel, tickInterval);
         }
     }
