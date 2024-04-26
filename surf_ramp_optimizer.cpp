@@ -1,12 +1,34 @@
 #include "surf_ramp_optimizer.h"
-//#include <IPlayerHelpers.h>
 #include <immintrin.h>
 #include <limits>
 #include <igameevents.h>
-//#include <ILogger.h>
 #include <algorithm>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
+// Forward declarations
+class SurfRampOptimizer;
+class CBrachistochroneOptimizer;
+class PlayerMovementTracking;
+class BVHNode;
+class Matrix;
+class Vector;
+class Ramp;
+class CBaseEntity;
+namespace CollisionDetection;
+namespace NumericalMethods;  
+namespace MathUtils;
+namespace Optimization;
+namespace Pathfinding;
+
+// Global constants
+constexpr float MAX_PLAYER_DIST_TO_PATH = 50.0f;
+constexpr float GRADIENT_TOLERANCE = 1e-6f;
+constexpr int MAX_OPTIMIZATION_ITERATIONS = 100;
+
+// Global variables
 SurfRampOptimizer g_SurfRampOptimizer;
 SMEXT_LINK(&g_SurfRampOptimizer);
 
@@ -28,12 +50,17 @@ std::vector<std::unique_ptr<CBrachistochroneOptimizer>> g_SurfRamps;
 BVHNode* g_BVHRoot = nullptr;
 std::unordered_map<CBaseEntity*, Ramp> g_RampCache;
 
-bool SurfRampOptimizer::SDK_OnLoad(char* error, size_t maxlength, bool late) {
-    if (!SetupGameInterfaces(error, maxlength)) {
+// SurfRampOptimizer methods
+
+bool SurfRampOptimizer::SDK_OnLoad(char* error, size_t maxlength, bool late) 
+{
+    if (!SetupGameInterfaces(error, maxlength)) 
+    {
         return false;
     }
 
-    if (!LoadConfigurations(error, maxlength)) {
+    if (!LoadConfigurations(error, maxlength)) 
+    {
         return false;
     }
 
@@ -42,7 +69,8 @@ bool SurfRampOptimizer::SDK_OnLoad(char* error, size_t maxlength, bool late) {
     return true;
 }
 
-bool SurfRampOptimizer::SetupGameInterfaces(char* error, size_t maxlength) {
+bool SurfRampOptimizer::SetupGameInterfaces(char* error, size_t maxlength) 
+{
     gameents = gamehelpers->GetIServerGameEnts();
     g_pGameHelpers = gamehelpers;
     gpGlobals = gamehelpers->GetGlobalVars();
@@ -52,7 +80,8 @@ bool SurfRampOptimizer::SetupGameInterfaces(char* error, size_t maxlength) {
     g_pGameMovement = g_pBinTools->GetGameMovement();
     playerinfomngr = playerhelpers->GetPlayerInfoManager();
 
-    if (!gameents || !g_pGameHelpers || !gpGlobals || !g_pSDKTools || !g_pBinTools || !g_pGameMovement || !playerinfomngr) {
+    if (!gameents || !g_pGameHelpers || !gpGlobals || !g_pSDKTools || !g_pBinTools || !g_pGameMovement || !playerinfomngr) 
+    {
         snprintf(error, maxlength, "Failed to get required game interfaces");
         return false;
     }
@@ -60,7 +89,8 @@ bool SurfRampOptimizer::SetupGameInterfaces(char* error, size_t maxlength) {
     return true;
 }
 
-bool SurfRampOptimizer::LoadConfigurations(char* error, size_t maxlength) {
+bool SurfRampOptimizer::LoadConfigurations(char* error, size_t maxlength) 
+{
     sharesys->AddDependency(myself, "bintools.ext", true, true);
     sharesys->AddDependency(myself, "sdktools.ext", true, true);
     sharesys->AddDependency(myself, "playerhelpers.ext", true, true);
@@ -70,123 +100,85 @@ bool SurfRampOptimizer::LoadConfigurations(char* error, size_t maxlength) {
     return true;
 }
 
-void SurfRampOptimizer::InitializeDataStructures() {
+void SurfRampOptimizer::InitializeDataStructures() 
+{
     g_SurfRamps.clear();
+    delete g_BVHRoot;
     g_BVHRoot = new BVHNode(Vector(-1000.0f, -1000.0f, -1000.0f), Vector(1000.0f, 1000.0f, 1000.0f));
 }
 
-void SurfRampOptimizer::SDK_OnUnload() {
+void SurfRampOptimizer::SDK_OnUnload() 
+{
     g_pSDKTools->RemoveEntityListener(&g_SurfRampOptimizer);
 
-    std::lock_guard<std::mutex> lock(g_SurfRampsMutex);
-    for (auto it = g_SurfRamps.begin(); it != g_SurfRamps.end(); ++it) {
-        delete* it;
+    {
+        std::lock_guard<std::mutex> lock(g_SurfRampsMutex);
+        g_SurfRamps.clear();
     }
-    g_SurfRamps.clear();
 
     delete g_BVHRoot;
     g_BVHRoot = nullptr;
 }
 
-void SurfRampOptimizer::SDK_OnAllLoaded() {
+void SurfRampOptimizer::SDK_OnAllLoaded() 
+{
     SM_GET_LATE_IFACE(SDKTOOLS, g_pSDKTools);
     SM_GET_LATE_IFACE(BINTOOLS, g_pBinTools);
 
-    if (g_pSDKTools == nullptr || g_pBinTools == nullptr) {
+    if (!g_pSDKTools || !g_pBinTools)
+    {
         smutils->LogError(myself, "Failed to get bin tools or SDK tools interfaces");
         return;
     }
 
     g_pGameMovement = g_pBinTools->GetGameMovement();
 
-    if (g_pGameMovement == nullptr) {
+    if (!g_pGameMovement)
+    {
         smutils->LogError(myself, "Failed to get IGameMovement interface");
         return;
     }
 
-    g_fwdOnStartTouchRamp = g_pGameHelpers->CreateForward("OnStartTouchRamp", ET_Event, 2, NULL);
+    g_fwdOnStartTouchRamp = g_pGameHelpers->CreateForward("OnStartTouchRamp", ET_Event, 2, nullptr);
 
     g_pSDKTools->AddEntityListener(&g_SurfRampOptimizer);
 
     CollisionDetection::Initialize();
 
-    g_ServerTickrate = gpGlobals->tickRate;
-    smutils->LogMessage(myself, "SurfRampOptimizer is loaded (Server Tickrate: %.2f)", g_ServerTickrate);
+    smutils->LogMessage(myself, "SurfRampOptimizer is loaded (Server Tickrate: %.2f)", gpGlobals->tickRate);
 }
 
-bool SurfRampOptimizer::QueryRunning(char* error, size_t maxlength) {
+bool SurfRampOptimizer::QueryRunning(char* error, size_t maxlength) 
+{
     SM_CHECK_IFACE(SDKTOOLS, g_pSDKTools);
     SM_CHECK_IFACE(BINTOOLS, g_pBinTools);
     return true;
 }
 
-void FireOnStartTouchRampForward(CBaseEntity* pPlayer, CBaseEntity* pRamp) {
-    if (g_fwdOnStartTouchRamp != NULL) {
-        cell_t playerIndex = gamehelpers->EntityToBCompatRef(pPlayer);
-        cell_t rampIndex = gamehelpers->EntityToBCompatRef(pRamp);
-        g_fwdOnStartTouchRamp->PushCell(playerIndex);
-        g_fwdOnStartTouchRamp->PushCell(rampIndex);
-        g_fwdOnStartTouchRamp->Execute(NULL);
-    }
-}
-
-static void OnStartTouch(CBaseEntity* pOther) {
-    if (!pOther || !pOther->IsPlayer()) {
+void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classname) 
+{
+    if (!pEntity || !classname || std::string(classname) != "surf_ramp")
+    {
         return;
     }
-    if (pOther->GetClassName() == "surf_ramp") {
-        FireOnStartTouchRampForward(pOther, gameents->BaseEntityToEdict(reinterpret_cast<CBaseEntity*>(this)));
 
-        Ramp ramp;
-        {
-            std::lock_guard<std::mutex> lock(g_RampCacheMutex);
-            auto it = g_RampCache.find(this);
-            if (it != g_RampCache.end()) {
-                ramp = it->second;
-            }
-        }
+    Ramp ramp = GetRampFromEntity(pEntity);
+    auto optimizer = std::make_unique<CBrachistochroneOptimizer>(ramp, pEntity);
 
-        if (ramp.startPoint.Length() > 0) {
-            CBasePlayer* pPlayer = static_cast<CBasePlayer*>(pOther);
-            if (!pPlayer) {
-                return;
-            }
-            Optimize(pPlayer, ramp);
-        }
-
-        for (const auto& bc : g_SurfRamps) {
-            if (bc->GetRamp() == ramp) {
-                std::vector<Vector> points = bc->Optimize(pos, vel, tickInterval);
-                bc->Update(pos, vel, pOther->GetAbsVelocity() - vel, tickInterval);
-                break;
-            }
-        }
-    }
-}
-
-void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classname) {
-    if (!pEntity || !classname){
-        return;
-    }
-    
-    if (std::string(classname) == "surf_ramp") {
+    {
         std::lock_guard<std::mutex> lock(g_SurfRampsMutex);
-        pEntity->SetTouch(OnStartTouch);
-        Ramp ramp = GetRampFromEntity(pEntity);
-        
-        {
-            std::lock_guard<std::mutex> lock(g_RampCacheMutex);
-            g_RampCache[pEntity] = ramp;
-        }
-        
-        g_SurfRamps.push_back(std::make_unique<CBrachistochroneOptimizer>(ramp, nullptr));
-        CollisionDetection::InsertRamp(&ramp);
+        pEntity->SetTouch(SurfRampOptimizer::OnStartTouch);
+        g_SurfRamps.push_back(std::move(optimizer));
     }
+
+    CollisionDetection::InsertRamp(&ramp);
 }
 
-void SurfRampOptimizer::OnEntityDestroyed(CBaseEntity* pEntity) {
+void SurfRampOptimizer::OnEntityDestroyed(CBaseEntity* pEntity) 
+{
     std::lock_guard<std::mutex> lock(g_SurfRampsMutex);
-    g_SurfRamps.erase(std::remove_if(g_SurfRamps.begin(), g_SurfRamps.end(), [&](const auto& optimizer) {
+    g_SurfRamps.erase(std::remove_if(g_SurfRamps.begin(), g_SurfRamps.end(), [&](const auto& optimizer) 
+    {
         return optimizer->GetRamp().startPoint == pEntity->GetAbsOrigin();
     }), g_SurfRamps.end());
 
@@ -196,44 +188,54 @@ void SurfRampOptimizer::OnEntityDestroyed(CBaseEntity* pEntity) {
     }
 }
 
-void Optimize(CBasePlayer* pPlayer, const Ramp& ramp) {
-    Vector pos = pPlayer->GetAbsOrigin(), vel = pPlayer->GetAbsVelocity();
-    float tickInterval = 1.0f / g_ServerTickrate;
-
-    for (const auto& bc : g_SurfRamps) {
-        if (bc->GetRamp() == ramp) {
-            std::vector<Vector> points = bc->Optimize(pos, vel, tickInterval);
-            bc->Update(pos, vel, pPlayer->GetAbsVelocity() - vel, tickInterval);
-            break;
-        }
-    }
-}
-
-void Predict(CBasePlayer* pPlayer) {
-    std::vector<Vector> path;
-
-    for (const auto& bc : g_SurfRamps) {
-        if (bc->GetPlayer() == pPlayer) {
-            path = bc->GetPath();
-            break;
-        }
-    }
-
-    std::vector<Ramp> ramps;
+void SurfRampOptimizer::OnStartTouch(CBaseEntity* pOther) 
+{
+    if (!pOther || !pOther->IsPlayer())
     {
-        std::lock_guard<std::mutex> lock(g_RampCacheMutex);
-        for (auto it = g_RampCache.begin(); it != g_RampCache.end(); ++it) {
-            ramps.push_back(it->second);
-        }
+        return;
     }
 
-    std::vector<Vector> predicted = Pathfinding::Pathfinding(pPlayer->GetAbsOrigin(), path.back(), ramps);
-    std::vector<Vector> smoothed = Optimization::OptimizePath(predicted, ramps.back(), gpGlobals->gravity, gpGlobals->airAccelerate);
+    if (pOther->GetClassName() == "surf_ramp") 
+    {
+        FireOnStartTouchRampForward(pOther, gameents->BaseEntityToEdict(this));
 
-    // Visualize smoothed path with temp entities or something
+        Ramp ramp;
+        {
+            std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+            auto it = g_RampCache.find(this);
+            if (it != g_RampCache.end()) 
+            {
+                ramp = it->second;
+            }
+        }
+
+        if (ramp.startPoint.Length() > 0)
+        {
+            CBasePlayer* pPlayer = static_cast<CBasePlayer*>(pOther);
+            if (pPlayer)
+            {
+                Optimize(pPlayer, ramp);
+            }
+        }
+
+        for (const auto& bc : g_SurfRamps) 
+        {
+            if (bc->GetRamp() == ramp) 
+            {
+                Vector pos = pOther->GetAbsOrigin();
+                Vector vel = pOther->GetAbsVelocity();
+                float tickInterval = 1.0f / gpGlobals->tickRate;
+                
+                std::vector<Vector> points = bc->Optimize(pos, vel, tickInterval);
+                bc->Update(pos, vel, pOther->GetAbsVelocity() - vel, tickInterval);
+                break;
+            }
+        }
+    }
 }
 
-bool SurfRampOptimizer::SDK_OnMetamodLoad(ISmmAPI* ismm, char* error, size_t maxlen, bool late) {
+bool SurfRampOptimizer::SDK_OnMetamodLoad(ISmmAPI* ismm, char* error, size_t maxlen, bool late) 
+{
     GET_V_IFACE_CURRENT(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
     GET_V_IFACE_CURRENT(GetEngineFactory, gameents, IServerGameEnts, INTERFACEVERSION_SERVERGAMEENTS);
     GET_V_IFACE_ANY(GetServerFactory, playerhelpers, IPlayerInfoManager, INTERFACEVERSION_PLAYERINFOMANAGER);
@@ -241,371 +243,27 @@ bool SurfRampOptimizer::SDK_OnMetamodLoad(ISmmAPI* ismm, char* error, size_t max
     return true;
 }
 
-// Vector methods
-
-Vector::Vector() : x(0.0f), y(0.0f), z(0.0f), v(0.0f), w(0.0f), u(0.0f) {}
-
-Vector::Vector(float _x, float _y, float _z) : x(_x), y(_y), z(_z), v(0.0f), w(0.0f), u(0.0f) {}
-
-Vector::Vector(float _x, float _y, float _z, float _v, float _w, float _u) : x(_x), y(_y), z(_z), v(_v), w(_w), u(_u) {}
-
-float Vector::LengthSqr() const {
-    return x * x + y * y + z * z;
-}
-
-float Vector::Length() const {
-    return std::sqrt(LengthSqr());
-}
-
-Vector Vector::Normalized() const {
-    float len = Length();
-    if (len == 0.0f) {
-        return Vector();
-    }
-    return *this / len;
-}
-
-Vector Vector::Cross(const Vector& other) const {
-    return Vector(y * other.z - z * other.y, z * other.x - x * other.z, x * other.y - y * other.x);
-}
-
-float Vector::Dot(const Vector& other) const {
-    return x * other.x + y * other.y + z * other.z;
-}
-
-Vector Vector::operator+(const Vector& other) const {
-    return Vector(x + other.x, y + other.y, z + other.z);
-}
-
-Vector Vector::operator-(const Vector& other) const {
-    return Vector(x - other.x, y - other.y, z - other.z);
-}
-
-Vector Vector::operator*(float scalar) const {
-    return Vector(x * scalar, y * scalar, z * scalar);
-}
-
-Vector Vector::operator/(float scalar) const {
-    float invScalar = 1.0f / scalar;
-    return Vector(x * invScalar, y * invScalar, z * invScalar);
-}
-
-bool Vector::operator==(const Vector& other) const {
-    return x == other.x && y == other.y && z == other.z;
-}
-
-bool Vector::operator!=(const Vector& other) const {
-    return !(*this == other);
-}
-
-// Ramp methods
-
-bool Ramp::operator==(const Ramp& other) const {
-    return startPoint == other.startPoint && endPoint == other.endPoint && normal == other.normal &&
-        length == other.length && width == other.width &&
-        minExtents == other.minExtents && maxExtents == other.maxExtents;
-}
-
-// Matrix methods
-
-Matrix::Matrix(int rows, int cols) : m_rows(rows), m_cols(cols), m_data(new float[rows * cols]) {}
-
-Matrix::Matrix(const Matrix& other) : m_rows(other.m_rows), m_cols(other.m_cols), m_data(new float[m_rows * m_cols]) {
-    std::memcpy(m_data, other.m_data, m_rows * m_cols * sizeof(float));
-}
-
-Matrix::~Matrix() {
-    delete[] m_data;
-}
-
-Matrix Matrix::Identity(int size) {
-    Matrix result(size, size);
-    for (int i = 0; i < size; ++i) {
-        result.m_data[i * size + i] = 1.0f;
-    }
-    return result;
-}
-
-Matrix Matrix::OuterProduct(const Vector& u, const Vector& v) {
-    Matrix result(3, 3);
-    result.m_data[0] = u.x * v.x;
-    result.m_data[1] = u.x * v.y;
-    result.m_data[2] = u.x * v.z;
-    result.m_data[3] = u.y * v.x;
-    result.m_data[4] = u.y * v.y;
-    result.m_data[5] = u.y * v.z;
-    result.m_data[6] = u.z * v.x;
-    result.m_data[7] = u.z * v.y;
-    result.m_data[8] = u.z * v.z;
-    return result;
-}
-
-Matrix& Matrix::operator=(const Matrix& other) {
-    if (this != &other) {
-        delete[] m_data;
-        m_rows = other.m_rows;
-        m_cols = other.m_cols;
-        m_data = new float[m_rows * m_cols];
-        std::memcpy(m_data, other.m_data, m_rows * m_cols * sizeof(float));
-    }
-    return *this;
-}
-
-Matrix Matrix::operator+(const Matrix& other) const {
-    Matrix result(m_rows, m_cols);
-    for (int i = 0; i < m_rows * m_cols; ++i) {
-        result.m_data[i] = m_data[i] + other.m_data[i];
-    }
-    return result;
-}
-
-Matrix Matrix::operator-(const Matrix& other) const {
-    Matrix result(m_rows, m_cols);
-    for (int i = 0; i < m_rows * m_cols; ++i) {
-        result.m_data[i] = m_data[i] - other.m_data[i];
-    }
-    return result;
-}
-
-Matrix Matrix::operator*(const Matrix& other) const {
-    Matrix result(m_rows, other.m_cols);
-    for (int i = 0; i < m_rows; ++i) {
-        for (int j = 0; j < other.m_cols; ++j) {
-            float sum = 0.0f;
-            for (int k = 0; k < m_cols; ++k) {
-                sum += m_data[i * m_cols + k] * other.m_data[k * other.m_cols + j];
-            }
-            result.m_data[i * other.m_cols + j] = sum;
-        }
-    }
-    return result;
-}
-
-Vector Matrix::operator*(const Vector& v) const {
-    Vector result;
-    result.x = m_data[0] * v.x + m_data[1] * v.y + m_data[2] * v.z;
-    result.y = m_data[3] * v.x + m_data[4] * v.y + m_data[5] * v.z;
-    result.z = m_data[6] * v.x + m_data[7] * v.y + m_data[8] * v.z;
-    return result;
-}
-
-int Matrix::Rows() const {
-    return m_rows;
-}
-
-int Matrix::Cols() const {
-    return m_cols;
-}
-
-// CBaseEntity methods
-
-CBaseEntity::CBaseEntity() : m_KeyValues(nullptr) {}
-
-CBaseEntity::~CBaseEntity() {
-    if (m_KeyValues) {
-        m_KeyValues->deleteThis();
-    }
-}
-
-void CBaseEntity::SetKeyValues(KeyValues* kvData) {
-    if (m_KeyValues) {
-        m_KeyValues->deleteThis();
-    }
-    m_KeyValues = kvData;
-}
-
-KeyValues* CBaseEntity::GetKeyValues() const {
-    return m_KeyValues;
-}
-
-void CBaseEntity::SetAbsAngles(const QAngle& angles) {
-    m_AbsAngles = angles;
-}
-
-QAngle CBaseEntity::GetAbsAngles() const {
-    return m_AbsAngles;
-}
-
-Vector CBaseEntity::GetAbsOrigin() const {
-    return m_AbsOrigin;
-}
-
-void CBaseEntity::SetAbsOrigin(const Vector& origin) {
-    m_AbsOrigin = origin;
-}
-
-Vector CBaseEntity::GetForwardVector() const {
-    Vector forward;
-    AngleVectors(m_AbsAngles, &forward);
-    return forward;
-}
-
-Vector CBaseEntity::GetUpVector() const {
-    Vector up;
-    AngleVectors(m_AbsAngles, nullptr, nullptr, &up);
-    return up;
-}
-
-float CBaseEntity::GetValueForKey(const char* key) const {
-    KeyValues* kvData = GetKeyValues();
-    if (kvData) {
-        return kvData->GetFloat(key, 0.0f);
-    }
-    return 0.0f;
-}
-
-// PlayerMovementTracking methods
-
-PlayerMovementTracking::PlayerMovementTracking(float maxDeviationDistance, size_t bufferCapacity)
-    : m_maxDeviationDistance(maxDeviationDistance),
-    m_positions(bufferCapacity),
-    m_velocities(bufferCapacity),
-    m_accelerations(bufferCapacity),
-    m_timeIntervals(bufferCapacity) {}
-
-PlayerMovementTracking::~PlayerMovementTracking() {}
-
-void PlayerMovementTracking::UpdatePlayerState(const Vector& position, const Vector& velocity, const Vector& acceleration, float tickInterval) {
-    m_positions.push_back(position);
-    m_velocities.push_back(velocity);
-    m_accelerations.push_back(acceleration);
-    m_timeIntervals.push_back(tickInterval);
-
-    if (m_positions.size() > m_positions.capacity()) {
-        m_positions.pop_front();
-        m_velocities.pop_front();
-        m_accelerations.pop_front();
-        m_timeIntervals.pop_front();
-    }
-}
-
-Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const {
-    if (m_positions.empty()) {
-        return Vector();
-    }
-
-    size_t n = m_positions.size() - 1;
-    Vector position = m_positions[n];
-    Vector velocity = m_velocities[n];
-    Vector acceleration = m_accelerations[n];
-    float timeInterval = m_timeIntervals[n];
-
-    return position + velocity * timeStep + 0.5f * acceleration * timeStep * timeStep;
-}
-
-bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path) const {
-    if (m_positions.empty() || path.empty()) {
-        return false;
-    }
-
-    Vector playerPos = m_positions.back();
-    float minDistance = std::numeric_limits<float>::max();
-
-    for (const Vector& point : path) {
-        float distance = (playerPos - point).LengthSqr();
-        minDistance = std::min(minDistance, distance);
-    }
-
-    return std::sqrt(minDistance) > m_maxDeviationDistance;
-}
-
-void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer, float tickInterval) {
-    if (HasDeviatedFromPath(currentPath)) {
-        Vector currentPos = m_positions.back();
-        Vector currentVel = m_velocities.back();
-        Vector goal = currentPath.back();
-
-        std::vector<Vector> newPath = Pathfinding::Pathfinding(currentPos, goal, ramps);
-
-        if (!newPath.empty()) {
-            optimizer.m_OptimizedPath = optimizer.Optimize(currentPos, currentVel, tickInterval);
-        }
-    }
-}
-
-// BVHNode methods
-
-BVHNode::BVHNode(const Vector& min, const Vector& max)
-    : minExtents(min), maxExtents(max), left(nullptr), right(nullptr) {}
-
-BVHNode::~BVHNode() {
-    delete left;
-    delete right;
-}
-
-void BVHNode::Insert(Ramp* ramp) {
-    if (left == nullptr && right == nullptr) {
-        objects.push_back(ramp);
-
-        if (objects.size() > 4) {
-            Vector center = (minExtents + maxExtents) * 0.5f;
-            left = new BVHNode(minExtents, center);
-            right = new BVHNode(center, maxExtents);
-
-            for (Ramp* obj : objects) {
-                if (obj->minExtents.x < center.x) {
-                    left->Insert(obj);
-                }
-                else {
-                    right->Insert(obj);
-                }
-            }
-
-            objects.clear();
-        }
-    }
-    else {
-        if (ramp->minExtents.x < left->maxExtents.x) {
-            left->Insert(ramp);
-        }
-        else {
-            right->Insert(ramp);
-        }
-    }
-}
-
-std::vector<Ramp*> BVHNode::Query(const Vector& point) {
-    std::vector<Ramp*> result;
-
-    if (point.x >= minExtents.x && point.x <= maxExtents.x &&
-        point.y >= minExtents.y && point.y <= maxExtents.y &&
-        point.z >= minExtents.z && point.z <= maxExtents.z) {
-        result.insert(result.end(), objects.begin(), objects.end());
-
-        if (left != nullptr) {
-            std::vector<Ramp*> leftResult = left->Query(point);
-            result.insert(result.end(), leftResult.begin(), leftResult.end());
-        }
-
-        if (right != nullptr) {
-            std::vector<Ramp*> rightResult = right->Query(point);
-            result.insert(result.end(), rightResult.begin(), rightResult.end());
-        }
-    }
-
-    return result;
-}
-
 // CBrachistochroneOptimizer methods
 
 CBrachistochroneOptimizer::CBrachistochroneOptimizer(const Ramp& ramp, CBaseEntity* player)
-    : m_Ramp(ramp), m_Player(player), m_PlayerTracker(MAX_PLAYER_DIST_TO_PATH) {
+    : m_Ramp(ramp)
+    , m_Player(player)
+    , m_PlayerTracker(MAX_PLAYER_DIST_TO_PATH)
+{
     m_AirAccelerate = gpGlobals->airAccelerate;
     m_Gravity = gpGlobals->gravity;
 }
 
-CBrachistochroneOptimizer::~CBrachistochroneOptimizer() {
-    // No need for manual cleanup, smart pointers will handle it
-}
-
-std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickInterval) {
+std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickInterval) 
+{
     float pathTime = NumericalMethods::CalculateBrachistochronePathTime(startPos, m_Ramp.endPoint, m_Gravity);
 
-    if (pathTime <= 0.0f) {
-        return std::vector<Vector>(); //fix this
+    if (pathTime <= 0.0f)
+    {
+        return {}; 
     }
 
-    float timeStep = tickInterval;
+    const float timeStep = tickInterval;
 
     Vector prevPos = startPos;
     Vector currVel = startVel;
@@ -614,7 +272,8 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
     m_OptimizedPath.clear();
     m_OptimizedPath.push_back(startPos);
 
-    for (float t = 0.0f; t <= pathTime; t += timeStep) {
+    for (float t = 0.0f; t <= pathTime; t += timeStep) 
+    {
         Vector pos = NumericalMethods::SolveBrachistochrone(startPos, m_Ramp.endPoint, t, m_Gravity, m_AirAccelerate);
         Vector accelDir = (pos - prevPos).Normalized();
 
@@ -626,20 +285,24 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
         currVel += accelDir * accelAmount - currAccel * timeStep;
         currAccel = accelDir * accelAmount / timeStep;
 
-        if (currVel.Length() > maxVelocity) {
+        if (currVel.Length() > maxVelocity)
+        {
             currVel = currVel.Normalized() * maxVelocity;
         }
 
-        if (IsPathValid(pos)) {
+        if (IsPathValid(pos))
+        {
             m_OptimizedPath.push_back(pos);
             prevPos = pos;
         }
-        else {
+        else
+        {
             break;
         }
     }
 
-    if (IsPathValid(m_Ramp.endPoint)) {
+    if (IsPathValid(m_Ramp.endPoint))
+    {
         m_OptimizedPath.push_back(m_Ramp.endPoint);
     }
 
@@ -648,58 +311,221 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
     return m_OptimizedPath;
 }
 
-void CBrachistochroneOptimizer::Update(const Vector& playerPos, const Vector& playerVel, const Vector& playerAccel, float tickInterval) {
+void CBrachistochroneOptimizer::Update(const Vector& playerPos, const Vector& playerVel, const Vector& playerAccel, float tickInterval)
+{
     m_PlayerTracker.UpdatePlayerState(playerPos, playerVel, playerAccel, tickInterval);
 
     std::vector<Ramp> ramps;
-    for (auto it = g_RampCache.begin(); it != g_RampCache.end(); ++it) {
-        ramps.push_back(it->second);
+    {
+        std::lock_guard<std::mutex> lock(g_RampCacheMutex);
+        for (auto it = g_RampCache.begin(); it != g_RampCache.end(); ++it) 
+        {
+            ramps.push_back(it->second);
+        }
     }
 
     m_PlayerTracker.RecalibratePath(m_OptimizedPath, ramps, *this, tickInterval);
-
-    if (m_PlayerTracker.HasDeviatedFromPath(m_OptimizedPath)) {
-        Vector estimatedPos = m_PlayerTracker.EstimatePlayerPosition(tickInterval);
-        Vector estimatedVel = playerVel;
-        m_OptimizedPath = Optimize(estimatedPos, estimatedVel, tickInterval);
-    }
 }
 
-bool CBrachistochroneOptimizer::IsPathValid(const Vector& point) const {
+bool CBrachistochroneOptimizer::IsPathValid(const Vector& point) const 
+{
     return !CollisionDetection::Intersects(point, m_Ramp);
 }
 
-const Ramp& CBrachistochroneOptimizer::GetRamp() const {
+const Ramp& CBrachistochroneOptimizer::GetRamp() const 
+{
     return m_Ramp;
 }
 
-const std::vector<Vector>& CBrachistochroneOptimizer::GetPath() const {
+const std::vector<Vector>& CBrachistochroneOptimizer::GetPath() const 
+{
     return m_OptimizedPath;
 }
 
-CBaseEntity* CBrachistochroneOptimizer::GetPlayer() const {
+CBaseEntity* CBrachistochroneOptimizer::GetPlayer() const 
+{
     return m_Player;
+}
+
+// PlayerMovementTracking methods
+
+PlayerMovementTracking::PlayerMovementTracking(float maxDeviationDistance, size_t bufferCapacity)
+    : m_MaxDeviationDistance(maxDeviationDistance)
+    , m_Positions(bufferCapacity)
+    , m_Velocities(bufferCapacity)
+    , m_Accelerations(bufferCapacity)
+    , m_TimeIntervals(bufferCapacity) 
+{}
+
+void PlayerMovementTracking::UpdatePlayerState(const Vector& position, const Vector& velocity, const Vector& acceleration, float tickInterval) 
+{
+    m_Positions.push_back(position);
+    m_Velocities.push_back(velocity);
+    m_Accelerations.push_back(acceleration);
+    m_TimeIntervals.push_back(tickInterval);
+
+    if (m_Positions.size() > m_Positions.capacity()) 
+    {
+        m_Positions.pop_front();
+        m_Velocities.pop_front();
+        m_Accelerations.pop_front();
+        m_TimeIntervals.pop_front();
+    }
+}
+
+Vector PlayerMovementTracking::EstimatePlayerPosition(float timeStep) const 
+{
+    if (m_Positions.empty())
+    {
+        return {};
+    }
+
+    size_t n = m_Positions.size() - 1;
+    Vector position = m_Positions[n];
+    Vector velocity = m_Velocities[n];
+    Vector acceleration = m_Accelerations[n];
+    float timeInterval = m_TimeIntervals[n];
+
+    return position + velocity * timeStep + 0.5f * acceleration * timeStep * timeStep;
+}
+
+bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path) const 
+{
+    if (m_Positions.empty() || path.empty())
+    {
+        return false;
+    }
+
+    Vector playerPos = m_Positions.back();
+    float minDistance = std::numeric_limits<float>::max(); /////fix
+
+    for (const Vector& point : path)
+    {
+        float distance = (playerPos - point).LengthSqr();
+        minDistance = std::min(minDistance, distance);
+    }
+
+    return minDistance > m_MaxDeviationDistance * m_MaxDeviationDistance;
+}
+
+void PlayerMovementTracking::RecalibratePath(const std::vector<Vector>& currentPath, const std::vector<Ramp>& ramps, CBrachistochroneOptimizer& optimizer, float tickInterval)
+{
+    if (HasDeviatedFromPath(currentPath))
+    {
+        Vector currentPos = m_Positions.back();
+        Vector currentVel = m_Velocities.back();
+        Vector goal = currentPath.back();
+
+        std::vector<Vector> newPath = Pathfinding::Pathfinding(currentPos, goal, ramps);
+
+        if (!newPath.empty())
+        {
+            optimizer.m_OptimizedPath = optimizer.Optimize(currentPos, currentVel, tickInterval);
+        }
+    }
+}
+
+// BVHNode methods
+
+BVHNode::BVHNode(const Vector& min, const Vector& max)
+    : minExtents(min)
+    , maxExtents(max)
+    , left(nullptr)
+    , right(nullptr)
+{}
+
+BVHNode::~BVHNode()
+{
+    delete left;
+    delete right;
+}
+
+void BVHNode::Insert(Ramp* ramp)
+{
+    if (!left && !right)
+    {
+        objects.push_back(ramp);
+
+        if (objects.size() > 4)
+        {
+            Vector center = (minExtents + maxExtents) * 0.5f;
+            left = new BVHNode(minExtents, center);
+            right = new BVHNode(center, maxExtents);
+
+            for (Ramp* obj : objects)
+            {
+                if (obj->minExtents.x < center.x)
+                {
+                    left->Insert(obj);
+                }
+                else
+                {
+                    right->Insert(obj);
+                }
+            }
+
+            objects.clear();
+        }
+    }
+    else
+    {
+        if (ramp->minExtents.x < left->maxExtents.x)
+        {
+            left->Insert(ramp);
+        }
+        else
+        {
+            right->Insert(ramp);
+        }
+    }
+}
+
+std::vector<Ramp*> BVHNode::Query(const Vector& point) const
+{
+    std::vector<Ramp*> result;
+
+    if (point.x >= minExtents.x && point.x <= maxExtents.x &&
+        point.y >= minExtents.y && point.y <= maxExtents.y &&
+        point.z >= minExtents.z && point.z <= maxExtents.z)
+    {
+        result.insert(result.end(), objects.begin(), objects.end());
+
+        if (left)
+        {
+            std::vector<Ramp*> leftResult = left->Query(point);
+            result.insert(result.end(), leftResult.begin(), leftResult.end());
+        }
+
+        if (right)
+        {
+            std::vector<Ramp*> rightResult = right->Query(point);
+            result.insert(result.end(), rightResult.begin(), rightResult.end());
+        }
+    }
+
+    return result;
 }
 
 // CollisionDetection methods
 
-BVHNode* g_BVHRoot = nullptr;
-
-void CollisionDetection::Initialize() {
+void CollisionDetection::Initialize() 
+{
     g_BVHRoot = new BVHNode(Vector(-1000.0f, -1000.0f, -1000.0f), Vector(1000.0f, 1000.0f, 1000.0f));
 }
 
-void CollisionDetection::Shutdown() {
+void CollisionDetection::Shutdown() 
+{
     delete g_BVHRoot;
     g_BVHRoot = nullptr;
 }
 
-void CollisionDetection::InsertRamp(Ramp* ramp) {
+void CollisionDetection::InsertRamp(Ramp* ramp)
+{
     g_BVHRoot->Insert(ramp);
 }
 
-bool CollisionDetection::Intersects(const Vector& point, const Ramp& ramp) {
-    // Use GJK algorithm for collision detection
+bool CollisionDetection::Intersects(const Vector& point, const Ramp& ramp)
+{
     Ramp pointRamp;
     pointRamp.startPoint = point;
     pointRamp.endPoint = point;
@@ -708,59 +534,66 @@ bool CollisionDetection::Intersects(const Vector& point, const Ramp& ramp) {
     return GJKIntersection(pointRamp, ramp);
 }
 
-bool CollisionDetection::GJKIntersection(const Ramp& ramp1, const Ramp& ramp2) {
+bool CollisionDetection::GJKIntersection(const Ramp& ramp1, const Ramp& ramp2)
+{
     Vector support[4];
     Vector direction = ramp2.startPoint - ramp1.startPoint;
 
     support[0] = SupportPoint(ramp1, ramp2, direction);
     support[1] = SupportPoint(ramp1, ramp2, -direction);
 
-
     Vector simplex[3];
     simplex[0] = support[0];
     simplex[1] = support[1];
 
-    direction = MathUtils::CrossProduct(simplex[1] - simplex[0], -simplex[0]);
+    direction = MathUtils::SIMDCrossProduct(simplex[1] - simplex[0], -simplex[0]);
 
     int index = 2;
-    while (true) {
+    while (true)
+    {
         support[index] = SupportPoint(ramp1, ramp2, direction);
 
-        if (MathUtils::DotProduct(support[index], direction) < 0) {
+        if (MathUtils::SIMDDotProduct(support[index], direction) < 0)
+        {
             return false;
         }
 
         simplex[index] = support[index];
 
-        if (UpdateSimplex(simplex, direction, index)) {
+        if (UpdateSimplex(simplex, direction, index))
+        {
             return true;
         }
 
-        ++index;
-        index %= 3;
+        index = (index + 1) % 3;
     }
 }
 
-Vector CollisionDetection::SupportPoint(const Ramp& ramp1, const Ramp& ramp2, const Vector& direction) {
+Vector CollisionDetection::SupportPoint(const Ramp& ramp1, const Ramp& ramp2, const Vector& direction)
+{
     Vector support1 = FarthestPointInDirection(ramp1, direction);
     Vector support2 = FarthestPointInDirection(ramp2, -direction);
     return support1 - support2;
 }
 
-Vector CollisionDetection::FarthestPointInDirection(const Ramp& ramp, const Vector& direction) {
+Vector CollisionDetection::FarthestPointInDirection(const Ramp& ramp, const Vector& direction)
+{
     float maxDot = -std::numeric_limits<float>::max();
     Vector farthestPoint;
 
-    std::vector<Vector> vertices = {
+    std::vector<Vector> vertices =
+    {
         ramp.startPoint,
         ramp.endPoint,
         ramp.startPoint + Vector(0, ramp.width, 0),
         ramp.endPoint + Vector(0, ramp.width, 0)
     };
 
-    for (const Vector& vertex : vertices) {
-        float dot = MathUtils::DotProduct(vertex, direction);
-        if (dot > maxDot) {
+    for (const Vector& vertex : vertices)
+    {
+        float dot = MathUtils::SIMDDotProduct(vertex, direction);
+        if (dot > maxDot)
+        {
             maxDot = dot;
             farthestPoint = vertex;
         }
@@ -769,7 +602,8 @@ Vector CollisionDetection::FarthestPointInDirection(const Ramp& ramp, const Vect
     return farthestPoint;
 }
 
-bool CollisionDetection::UpdateSimplex(Vector* simplex, Vector& direction, int index) {
+bool CollisionDetection::UpdateSimplex(Vector* simplex, Vector& direction, int index)
+{
     Vector a = simplex[index];
     Vector b = simplex[(index + 1) % 3];
     Vector c = simplex[(index + 2) % 3];
@@ -778,29 +612,35 @@ bool CollisionDetection::UpdateSimplex(Vector* simplex, Vector& direction, int i
     Vector ac = c - a;
     Vector ao = -a;
 
-    Vector abPerp = MathUtils::CrossProduct(ac, ab);
+    Vector abPerp = MathUtils::SIMDCrossProduct(ac, ab);
 
-    if (MathUtils::DotProduct(abPerp, ao) > 0) {
+    if (MathUtils::SIMDDotProduct(abPerp, ao) > 0)
+    {
         direction = abPerp;
     }
-    else {
-        Vector acPerp = MathUtils::CrossProduct(ab, ac);
+    else
+    {
+        Vector acPerp = MathUtils::SIMDCrossProduct(ab, ac);
 
-        if (MathUtils::DotProduct(acPerp, ao) > 0) {
+        if (MathUtils::SIMDDotProduct(acPerp, ao) > 0)
+        {
             simplex[0] = a;
             simplex[1] = c;
             direction = acPerp;
         }
-        else {
-            if (MathUtils::DotProduct(ab, ao) > 0) {
+        else
+        {
+            if (MathUtils::SIMDDotProduct(ab, ao) > 0)
+            {
                 simplex[0] = a;
                 simplex[1] = b;
-                direction = MathUtils::CrossProduct(ab, ao);
+                direction = MathUtils::SIMDCrossProduct(ab, ao);
             }
-            else {
+            else
+            {
                 simplex[0] = b;
                 simplex[1] = c;
-                direction = MathUtils::CrossProduct(ac, ao);
+                direction = MathUtils::SIMDCrossProduct(ac, ao);
             }
         }
     }
@@ -810,12 +650,15 @@ bool CollisionDetection::UpdateSimplex(Vector* simplex, Vector& direction, int i
 
 // NumericalMethods methods
 
-Vector NumericalMethods::SolveBrachistochrone(const Vector& startPos, const Vector& endPos, float time, float gravity, float airAccelerate) {
+Vector NumericalMethods::SolveBrachistochrone(const Vector& startPos, const Vector& endPos, float time, float gravity, float airAccelerate)
+{
     return SolveBrachistochroneAdaptive(startPos, endPos, time, gravity, airAccelerate, 1e-6f);
 }
 
-Vector NumericalMethods::SolveBrachistochroneAdaptive(const Vector& startPos, const Vector& endPos, float time, float gravity, float airAccelerate, float errorTolerance) {
-    auto brachistochroneEquation = [](float t, Vector y, void* params) {
+Vector NumericalMethods::SolveBrachistochroneAdaptive(const Vector& startPos, const Vector& endPos, float time, float gravity, float airAccelerate, float errorTolerance)
+{
+    auto brachistochroneEquation = [](float t, Vector y, void* params)
+    {
         Vector* p = static_cast<Vector*>(params);
         Vector startPos = p[0];
         Vector endPos = p[1];
@@ -827,7 +670,7 @@ Vector NumericalMethods::SolveBrachistochroneAdaptive(const Vector& startPos, co
         Vector accel = Vector(0.0f, 0.0f, -gravity) + airAccelerate * vel.Normalized();
 
         return Vector(vel.x, vel.y, vel.z, accel.x, accel.y, accel.z);
-        };
+    };
 
     Vector y0 = Vector(startPos.x, startPos.y, startPos.z, 0.0f, 0.0f, 0.0f);
     Vector params[] = { startPos, endPos, Vector(gravity, 0.0f, 0.0f), Vector(airAccelerate, 0.0f, 0.0f) };
@@ -838,8 +681,10 @@ Vector NumericalMethods::SolveBrachistochroneAdaptive(const Vector& startPos, co
     return Vector(result.x, result.y, result.z);
 }
 
-float NumericalMethods::CalculateBrachistochronePathTime(const Vector& startPos, const Vector& endPos, float gravity) {
-    auto integrand = [](float t, void* params) {
+float NumericalMethods::CalculateBrachistochronePathTime(const Vector& startPos, const Vector& endPos, float gravity)
+{
+    auto integrand = [](float t, void* params)
+    {
         Vector* p = static_cast<Vector*>(params);
         Vector startPos = p[0];
         Vector endPos = p[1];
@@ -850,7 +695,7 @@ float NumericalMethods::CalculateBrachistochronePathTime(const Vector& startPos,
         float height = std::abs(displacement.z);
 
         return std::sqrt(distanceSquared / (2.0f * gravity * height));
-        };
+    };
 
     Vector params[] = { startPos, endPos, Vector(gravity, 0.0f, 0.0f) };
 
@@ -858,33 +703,37 @@ float NumericalMethods::CalculateBrachistochronePathTime(const Vector& startPos,
     return GaussianQuadrature(0.0f, 1.0f, n, integrand, params);
 }
 
-Vector NumericalMethods::CalculateGradient(const Vector& point, const Ramp& ramp, float gravity, float airAccelerate) {
+Vector NumericalMethods::CalculateGradient(const Vector& point, const Ramp& ramp, float gravity, float airAccelerate)
+{
     float h = 0.001f;
 
     Vector dx = SolveBrachistochrone(point + Vector(h, 0.0f, 0.0f), ramp.endPoint, gravity, airAccelerate) -
-        SolveBrachistochrone(point, ramp.endPoint, gravity, airAccelerate);
+                SolveBrachistochrone(point, ramp.endPoint, gravity, airAccelerate);
     Vector dy = SolveBrachistochrone(point + Vector(0.0f, h, 0.0f), ramp.endPoint, gravity, airAccelerate) -
-        SolveBrachistochrone(point, ramp.endPoint, gravity, airAccelerate);
+                SolveBrachistochrone(point, ramp.endPoint, gravity, airAccelerate);
     Vector dz = SolveBrachistochrone(point + Vector(0.0f, 0.0f, h), ramp.endPoint, gravity, airAccelerate) -
-        SolveBrachistochrone(point, ramp.endPoint, gravity, airAccelerate);
+                SolveBrachistochrone(point, ramp.endPoint, gravity, airAccelerate);
 
     return Vector(dx.x / h, dy.y / h, dz.z / h);
 }
 
-float NumericalMethods::GaussianQuadrature(float a, float b, int n, float (*f)(float, void*), void* params) {
+float NumericalMethods::GaussianQuadrature(float a, float b, int n, float (*f)(float, void*), void* params)
+{
     const float x[] = { -0.5773502692, 0.5773502692 };
     const float w[] = { 1.0, 1.0 };
 
     float h = (b - a) / n;
     float sum = 0.0;
 
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < n; ++i)
+    {
         float x0 = a + i * h;
         float x1 = a + (i + 1) * h;
         float mid = (x0 + x1) / 2;
         float dx = (x1 - x0) / 2;
 
-        for (int j = 0; j < 2; ++j) {
+        for (int j = 0; j < 2; ++j)
+        {
             float xj = mid + dx * x[j];
             sum += w[j] * f(xj, params);
         }
@@ -893,9 +742,11 @@ float NumericalMethods::GaussianQuadrature(float a, float b, int n, float (*f)(f
     return sum * h / 2;
 }
 
-Vector NumericalMethods::DormandPrince54(float t0, float tf, const Vector& y0, float (*f)(float, Vector, void*), void* params, float& h) {
+Vector NumericalMethods::DormandPrince54(float t0, float tf, const Vector& y0, float (*f)(float, Vector, void*), void* params, float& h)
+{
     const float a[] = { 0.0, 0.2, 0.3, 0.8, 8.0 / 9.0, 1.0, 1.0 };
-    const float b[][6] = {
+    const float b[][6] =
+    {
         {0.2},
         {3.0 / 40.0, 9.0 / 40.0},
         {44.0 / 45.0, -56.0 / 15.0, 32.0 / 9.0},
@@ -912,8 +763,10 @@ Vector NumericalMethods::DormandPrince54(float t0, float tf, const Vector& y0, f
     float h_max = tf - t0;
     float tol = 1e-6;
 
-    while (t < tf) {
-        if (t + h > tf) {
+    while (t < tf)
+    {
+        if (t + h > tf)
+        {
             h = tf - t;
         }
 
@@ -931,7 +784,8 @@ Vector NumericalMethods::DormandPrince54(float t0, float tf, const Vector& y0, f
         float h_new = h * std::pow(tol / error, 0.2);
         h_new = std::max(h_min, std::min(h_new, h_max));
 
-        if (error < tol) {
+        if (error < tol)
+        {
             t += h;
             y = y_next;
         }
@@ -944,31 +798,8 @@ Vector NumericalMethods::DormandPrince54(float t0, float tf, const Vector& y0, f
 
 // MathUtils methods
 
-Vector MathUtils::CrossProduct(const Vector& a, const Vector& b) {
-    return Vector(
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x
-    );
-}
-
-float MathUtils::DotProduct(const Vector& a, const Vector& b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-float MathUtils::Length(const Vector& v) {
-    return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
-Vector MathUtils::Normalized(const Vector& v) {
-    float len = Length(v);
-    if (len == 0.0f) {
-        return Vector();
-    }
-    return v / len;
-}
-
-Vector MathUtils::SIMDCrossProduct(const Vector& a, const Vector& b) {
+Vector MathUtils::SIMDCrossProduct(const Vector& a, const Vector& b)
+{
     __m128 a_simd = _mm_set_ps(0.0f, a.z, a.y, a.x);
     __m128 b_simd = _mm_set_ps(0.0f, b.z, b.y, b.x);
 
@@ -980,7 +811,8 @@ Vector MathUtils::SIMDCrossProduct(const Vector& a, const Vector& b) {
     return Vector(c_zxy[0], c_zxy[1], c_zxy[2]);
 }
 
-float MathUtils::SIMDDotProduct(const Vector& a, const Vector& b) {
+float MathUtils::SIMDDotProduct(const Vector& a, const Vector& b)
+{
     __m128 a_simd = _mm_set_ps(0.0f, a.z, a.y, a.x);
     __m128 b_simd = _mm_set_ps(0.0f, b.z, b.y, b.x);
 
@@ -991,7 +823,8 @@ float MathUtils::SIMDDotProduct(const Vector& a, const Vector& b) {
     return _mm_cvtss_f32(result);
 }
 
-float MathUtils::SIMDLength(const Vector& v) {
+float MathUtils::SIMDLength(const Vector& v)
+{
     __m128 v_simd = _mm_set_ps(0.0f, v.z, v.y, v.x);
     __m128 squared = _mm_mul_ps(v_simd, v_simd);
     squared = _mm_hadd_ps(squared, squared);
@@ -1000,7 +833,8 @@ float MathUtils::SIMDLength(const Vector& v) {
     return _mm_cvtss_f32(_mm_sqrt_ss(squared));
 }
 
-Vector MathUtils::SIMDNormalized(const Vector& v) {
+Vector MathUtils::SIMDNormalized(const Vector& v)
+{
     __m128 v_simd = _mm_set_ps(0.0f, v.z, v.y, v.x);
     __m128 squared = _mm_mul_ps(v_simd, v_simd);
     squared = _mm_hadd_ps(squared, squared);
@@ -1012,100 +846,46 @@ Vector MathUtils::SIMDNormalized(const Vector& v) {
     return Vector(normalized[0], normalized[1], normalized[2]);
 }
 
-float MathUtils::AdaptiveGaussKronrod(float a, float b, float tolerance, int maxDepth, float (*f)(float, void*), void* params) {
-    const float x7[4] = {
-        0.949107912342759, -0.949107912342759,
-        0.741531185599394, -0.741531185599394
-    };
-    const float w7[4] = {
-        0.129484966168870, 0.129484966168870,
-        0.279705391489277, 0.279705391489277
-    };
-
-    const float x15[8] = {
-        0.991455371120813, -0.991455371120813,
-        0.949107912342759, -0.949107912342759,
-        0.864864423359769, -0.864864423359769,
-        0.741531185599394, -0.741531185599394
-    };
-    const float w15[8] = {
-        0.022935322010529, 0.022935322010529,
-        0.063092092629979, 0.063092092629979,
-        0.104790010322250, 0.104790010322250,
-        0.140653259715525, 0.140653259715525
-    };
-
-    float h = (b - a) / 2;
-    float c = (a + b) / 2;
-
-    float f_c = f(c, params);
-    float result_gauss = f_c * w15[0];
-    float result_kronrod = f_c * w7[0];
-
-    for (int i = 1; i < 4; ++i) {
-        float x_i = h * x7[i - 1];
-        float f_l = f(c - x_i, params);
-        float f_r = f(c + x_i, params);
-
-        result_gauss += (f_l + f_r) * w15[2 * i - 1];
-        result_kronrod += (f_l + f_r) * w7[i];
-    }
-
-    for (int i = 4; i < 8; ++i) {
-        float x_i = h * x15[i - 1];
-        float f_l = f(c - x_i, params);
-        float f_r = f(c + x_i, params);
-
-        result_gauss += (f_l + f_r) * w15[i];
-    }
-
-    result_gauss *= h;
-    result_kronrod *= h;
-
-    float error = std::abs(result_kronrod - result_gauss);
-    if (error < tolerance || maxDepth == 0) {
-        return result_kronrod;
-    }
-
-    float left = AdaptiveGaussKronrod(a, c, tolerance / 2, maxDepth - 1, f, params);
-    float right = AdaptiveGaussKronrod(c, b, tolerance / 2, maxDepth - 1, f, params);
-
-    return left + right;
-}
-
 // Optimization methods
 
-std::vector<Vector> Optimization::OptimizePath(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate) {
-    if (path.empty()) {
-        return std::vector<Vector>(); //todo
+std::vector<Vector> Optimization::OptimizePath(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate)
+{
+    if (path.empty())
+    {
+        return {};
     }
     return OptimizePathBFGS(path, ramp, gravity, airAccelerate);
 }
 
-std::vector<Vector> Optimization::OptimizePathConjugateGradient(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate) {
-    if (path.empty()) {
-        return std::vector<Vector>(); //todo
+std::vector<Vector> Optimization::OptimizePathConjugateGradient(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate)
+{
+    if (path.empty())
+    {
+        return {};
     }
-    const int maxIterations = 100;
-    const float gradientTolerance = 1e-6f;
-
+    
     std::vector<Vector> optimizedPath = path;
     std::vector<Vector> gradients(path.size());
     Vector direction(0.0f, 0.0f, 0.0f);
 
-    for (int i = 0; i < maxIterations; ++i) {
+    for (int i = 0; i < MAX_OPTIMIZATION_ITERATIONS; ++i)
+    {
         bool converged = true;
 
-        for (size_t j = 1; j < optimizedPath.size() - 1; ++j) {
+        for (size_t j = 1; j < optimizedPath.size() - 1; ++j)
+        {
             Vector& point = optimizedPath[j];
             gradients[j] = NumericalMethods::CalculateGradient(point, ramp, gravity, airAccelerate);
 
-            if (gradients[j].LengthSqr() > gradientTolerance) {
+            if (gradients[j].LengthSqr() > GRADIENT_TOLERANCE)
+            {
                 converged = false;
-                if (i == 0) {
+                if (i == 0)
+                {
                     direction = -gradients[j];
                 }
-                else {
+                else
+                {
                     float beta = std::max(0.0f, gradients[j].Dot(gradients[j] - gradients[j - 1]) / gradients[j - 1].Dot(gradients[j - 1]));
                     direction = -gradients[j] + beta * direction;
                 }
@@ -1115,7 +895,8 @@ std::vector<Vector> Optimization::OptimizePathConjugateGradient(const std::vecto
             }
         }
 
-        if (converged) {
+        if (converged)
+        {
             break;
         }
     }
@@ -1123,35 +904,36 @@ std::vector<Vector> Optimization::OptimizePathConjugateGradient(const std::vecto
     return optimizedPath;
 }
 
-std::vector<Vector> Optimization::OptimizePathBFGS(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate) {
-    const int maxIterations = 100;
-    const float gradientTolerance = 1e-6f;
-
+std::vector<Vector> Optimization::OptimizePathBFGS(const std::vector<Vector>& path, const Ramp& ramp, float gravity, float airAccelerate)
+{
     std::vector<Vector> optimizedPath = path;
     std::vector<Vector> gradients(path.size());
     std::vector<Matrix> inverseHessians(path.size(), Matrix::Identity(3));
 
-    for (int i = 0; i < maxIterations; ++i) {
+    for (int i = 0; i < MAX_OPTIMIZATION_ITERATIONS; ++i)
+    {
         bool converged = true;
 
-        for (size_t j = 1; j < optimizedPath.size() - 1; ++j) {
+        for (size_t j = 1; j < optimizedPath.size() - 1; ++j)
+        {
             Vector& point = optimizedPath[j];
             gradients[j] = NumericalMethods::CalculateGradient(point, ramp, gravity, airAccelerate);
 
-            if (gradients[j].LengthSqr() > gradientTolerance) {
+            if (gradients[j].LengthSqr() > GRADIENT_TOLERANCE)
+            {
                 converged = false;
                 Vector direction = -inverseHessians[j] * gradients[j];
 
-                float alpha = LineSearch(point, direction, ramp, gravity, airAccelerate);
-                Vector prevPoint = point;
-                point -= direction * alpha;
+                float alpha = LineSearch(point, direction, ramp, gravity, airAccelerate).first;
+                point += direction * alpha;
 
                 Vector gradientDifference = NumericalMethods::CalculateGradient(point, ramp, gravity, airAccelerate) - gradients[j];
                 UpdateInverseHessian(inverseHessians[j], direction * alpha, gradientDifference);
             }
         }
 
-        if (converged) {
+        if (converged)
+        {
             break;
         }
     }
@@ -1159,15 +941,18 @@ std::vector<Vector> Optimization::OptimizePathBFGS(const std::vector<Vector>& pa
     return optimizedPath;
 }
 
-bool Optimization::SatisfiesWolfeConditions(const Vector& point, const Vector& direction, float alpha, const Ramp& ramp, float gravity, float airAccelerate, float c1, float c2) {
+bool Optimization::SatisfiesWolfeConditions(const Vector& point, const Vector& direction, float alpha, const Ramp& ramp, float gravity, float airAccelerate, float c1, float c2)
+{
     Vector newPoint = point - direction * alpha;
     float newCost = CalculatePathCost(newPoint, ramp, gravity, airAccelerate);
     float oldCost = CalculatePathCost(point, ramp, gravity, airAccelerate);
     Vector gradient = NumericalMethods::CalculateGradient(point, ramp, gravity, airAccelerate);
 
-    if (newCost <= oldCost + c1 * alpha * gradient.Dot(direction)) {
+    if (newCost <= oldCost + c1 * alpha * gradient.Dot(direction))
+    {
         Vector newGradient = NumericalMethods::CalculateGradient(newPoint, ramp, gravity, airAccelerate);
-        if (std::abs(newGradient.Dot(direction)) <= c2 * std::abs(gradient.Dot(direction))) {
+        if (std::abs(newGradient.Dot(direction)) <= c2 * std::abs(gradient.Dot(direction)))
+        {
             return true;
         }
     }
@@ -1175,43 +960,50 @@ bool Optimization::SatisfiesWolfeConditions(const Vector& point, const Vector& d
     return false;
 }
 
-std::pair<float, bool> Optimization::LineSearch(const Vector& point, const Vector& direction, const Ramp& ramp, float gravity, float airAccelerate) {
+std::pair<float, bool> Optimization::LineSearch(const Vector& point, const Vector& direction, const Ramp& ramp, float gravity, float airAccelerate)
+{
     const float c1 = 1e-4;
     const float c2 = 0.9;
     const float alpha_max = 1.0;
     const float alpha_min = 0.0;
     const float tau = 0.5;
-
     float alpha = 1.0;
     int max_iterations = 100;
 
-    for (int i = 0; i < max_iterations; ++i) {
-        if (SatisfiesWolfeConditions(point, direction, alpha, ramp, gravity, airAccelerate, c1, c2)) {
-            return std::make_pair(alpha, false); // return alpha and a flag indicating success
+    for (int i = 0; i < max_iterations; ++i)
+    {
+        if (SatisfiesWolfeConditions(point, direction, alpha, ramp, gravity, airAccelerate, c1, c2))
+        {
+            return std::make_pair(alpha, true);
         }
 
         float alpha_new;
-        if (i == 0) {
+        if (i == 0)
+        {
             alpha_new = alpha * tau;
         }
-        else {
+        else
+        {
             alpha_new = (alpha_min + alpha_max) / 2;
         }
 
-        if (SatisfiesWolfeConditions(point, direction, alpha_new, ramp, gravity, airAccelerate, c1, c2)) {
+        if (SatisfiesWolfeConditions(point, direction, alpha_new, ramp, gravity, airAccelerate, c1, c2))
+        {
             alpha_min = alpha_new;
         }
-        else {
+        else
+        {
             alpha_max = alpha_new;
         }
 
         alpha = alpha_new;
     }
 
-    return std::make_pair(alpha, true); // return alpha and a flag indicating max iterations reached
+    return std::make_pair(alpha, false);
 }
 
-float Optimization::CalculatePathCost(const Vector& point, const Ramp& ramp, float gravity, float airAccelerate) {
+float Optimization::CalculatePathCost(const Vector& point, const Ramp& ramp, float gravity, float airAccelerate)
+{
     const float distanceWeight = 1.0f;
     const float curvatureWeight = 0.5f;
 
@@ -1224,46 +1016,57 @@ float Optimization::CalculatePathCost(const Vector& point, const Ramp& ramp, flo
     Vector prevVector = prevPoint - point;
     Vector nextVector = nextPoint - point;
 
-    float curvatureCost = 1.0f - MathUtils::DotProduct(prevVector.Normalized(), nextVector.Normalized());
+    float curvatureCost = 1.0f - MathUtils::SIMDDotProduct(prevVector.Normalized(), nextVector.Normalized());
 
     return distanceWeight * distanceCost + curvatureWeight * curvatureCost;
 }
 
-Vector Optimization::GetClosestPointOnRamp(const Vector& point, const Ramp& ramp) {
+Vector Optimization::GetClosestPointOnRamp(const Vector& point, const Ramp& ramp)
+{
     Vector rampPlaneNormal = ramp.normal.Normalized();
     Vector pointToRampStart = ramp.startPoint - point;
 
-    float distanceToPlane = MathUtils::DotProduct(pointToRampStart, rampPlaneNormal);
+    float distanceToPlane = MathUtils::SIMDDotProduct(pointToRampStart, rampPlaneNormal);
     Vector closestPoint = point + rampPlaneNormal * distanceToPlane;
 
     return closestPoint;
 }
 
-void Optimization::UpdateInverseHessian(Matrix& inverseHessian, const Vector& direction, const Vector& gradientDifference) {
+void Optimization::UpdateInverseHessian(Matrix& inverseHessian, const Vector& direction, const Vector& gradientDifference)
+{
     Matrix hessianUpdate = Matrix::OuterProduct(direction, direction) / direction.Dot(gradientDifference);
     Matrix gradientDifferenceMatrix = Matrix::OuterProduct(gradientDifference, gradientDifference);
 
     inverseHessian = (Matrix::Identity(3) - hessianUpdate) * inverseHessian * (Matrix::Identity(3) - hessianUpdate)
-        + hessianUpdate * (1.0f / gradientDifference.Dot(direction));
+                     + hessianUpdate * (1.0f / gradientDifference.Dot(direction));
 }
 
 // Pathfinding methods
 
-std::optional<std::vector<Vector>> Pathfinding::Pathfinding(const Vector& start, const Vector& goal, const std::vector<Ramp>& ramps) {
-    struct Node {
+std::optional<std::vector<Vector>> Pathfinding::Pathfinding(const Vector& start, const Vector& goal, const std::vector<Ramp>& ramps)
+{
+    struct Node
+    {
         Vector position;
         float g;
         float h;
         Node* parent;
 
-        Node(const Vector& pos) : position(pos), g(0.0f), h(0.0f), parent(nullptr) {}
+        Node(const Vector& pos)
+            : position(pos)
+            , g(0.0f)
+            , h(0.0f)
+            , parent(nullptr)
+        {}
 
-        float F() const {
+        float F() const
+        {
             return g + h;
         }
     };
 
-    auto Heuristic = [](const Vector& a, const Vector& b) {
+    auto Heuristic = [](const Vector& a, const Vector& b)
+    {
         return (a - b).Length();
     };
 
@@ -1273,8 +1076,10 @@ std::optional<std::vector<Vector>> Pathfinding::Pathfinding(const Vector& start,
     Node* startNode = new Node(start);
     openList.push_back(startNode);
 
-    while (!openList.empty()) {
-        auto it = std::min_element(openList.begin(), openList.end(), [](const Node* a, const Node* b) {
+    while (!openList.empty())
+    {
+        auto it = std::min_element(openList.begin(), openList.end(), [](const Node* a, const Node* b)
+        {
             return a->F() < b->F();
         });
 
@@ -1282,43 +1087,53 @@ std::optional<std::vector<Vector>> Pathfinding::Pathfinding(const Vector& start,
         openList.erase(it);
         closedList.insert(currentNode);
 
-        if (currentNode->position == goal) {
+        if (currentNode->position == goal)
+        {
             std::vector<Vector> path;
-            while (currentNode != nullptr) {
+            while (currentNode != nullptr)
+            {
                 path.push_back(currentNode->position);
                 currentNode = currentNode->parent;
             }
             std::reverse(path.begin(), path.end());
 
-            // clean up memory
-            for (Node* node : openList) {
+            for (Node* node : openList)
+            {
                 delete node;
             }
-            for (Node* node : closedList) {
+            for (Node* node : closedList)
+            {
                 delete node;
             }
 
             return path;
         }
 
-        for (const Ramp& ramp : ramps) {
+        for (const Ramp& ramp : ramps)
+        {
             Vector rampEnd = ramp.endPoint;
-            if (std::find_if(closedList.begin(), closedList.end(), [&](const Node* node) {
+            if (std::find_if(closedList.begin(), closedList.end(), [&](const Node* node)
+            {
                 return node->position == rampEnd;
-            }) == closedList.end()) {
+            }) == closedList.end())
+            {
                 float g = currentNode->g + Heuristic(currentNode->position, rampEnd);
                 Node* neighbor = nullptr;
-                auto it = std::find_if(openList.begin(), openList.end(), [&](const Node* node) {
+                auto it = std::find_if(openList.begin(), openList.end(), [&](const Node* node)
+                {
                     return node->position == rampEnd;
                 });
-                if (it != openList.end()) {
+                if (it != openList.end())
+                {
                     neighbor = *it;
-                    if (g < neighbor->g) {
+                    if (g < neighbor->g)
+                    {
                         neighbor->g = g;
                         neighbor->parent = currentNode;
                     }
                 }
-                else {
+                else
+                {
                     neighbor = new Node(rampEnd);
                     neighbor->g = g;
                     neighbor->h = Heuristic(rampEnd, goal);
@@ -1329,27 +1144,32 @@ std::optional<std::vector<Vector>> Pathfinding::Pathfinding(const Vector& start,
         }
     }
 
-    // Clean up memory
-    for (Node* node : openList) {
+    for (Node* node : openList)
+    {
         delete node;
     }
-    for (Node* node : closedList) {
+    for (Node* node : closedList)
+    {
         delete node;
     }
 
     return std::nullopt;
 }
 
-// Ramp utility methods
+// Utility methods
 
-Ramp GetRampFromEntity(CBaseEntity* pEntity) {
-    if (!pEntity){
-        return Ramp();
+Ramp GetRampFromEntity(CBaseEntity* pEntity)
+{
+    if (!pEntity)
+    {
+        return {};
     }
+
     {
         std::lock_guard<std::mutex> lock(g_RampCacheMutex);
         auto it = g_RampCache.find(pEntity);
-        if (it != g_RampCache.end()) {
+        if (it != g_RampCache.end())
+        {
             return it->second;
         }
     }
@@ -1372,10 +1192,293 @@ Ramp GetRampFromEntity(CBaseEntity* pEntity) {
     ramp.minExtents = minExtents;
     ramp.maxExtents = maxExtents;
 
+    if (ramp.startPoint.Length() > 0 && ramp.endPoint.Length() > 0)
     {
         std::lock_guard<std::mutex> lock(g_RampCacheMutex);
         g_RampCache[pEntity] = ramp;
     }
 
     return ramp;
+}
+
+// Vector methods
+
+Vector::Vector()
+    : x(0.0f)
+    , y(0.0f)
+    , z(0.0f)
+    , v(0.0f)
+    , w(0.0f)
+    , u(0.0f)
+{}
+
+Vector::Vector(float _x, float _y, float _z)
+    : x(_x)
+    , y(_y)
+    , z(_z)
+    , v(0.0f)
+    , w(0.0f)
+    , u(0.0f)
+{}
+
+Vector::Vector(float _x, float _y, float _z, float _v, float _w, float _u)
+    : x(_x)
+    , y(_y)
+    , z(_z)
+    , v(_v)
+    , w(_w)
+    , u(_u)
+{}
+
+float Vector::LengthSqr() const
+{
+    return x * x + y * y + z * z;
+}
+
+float Vector::Length() const
+{
+    return std::sqrt(LengthSqr());
+}
+
+Vector Vector::Normalized() const
+{
+    return MathUtils::SIMDNormalized(*this);
+}
+
+Vector Vector::Cross(const Vector& other) const
+{
+    return MathUtils::SIMDCrossProduct(*this, other);
+}
+
+float Vector::Dot(const Vector& other) const
+{
+    return MathUtils::SIMDDotProduct(*this, other);
+}
+
+Vector Vector::operator+(const Vector& other) const
+{
+    return Vector(x + other.x, y + other.y, z + other.z);
+}
+
+Vector Vector::operator-(const Vector& other) const
+{
+    return Vector(x - other.x, y - other.y, z - other.z);
+}
+
+Vector Vector::operator*(float scalar) const
+{
+    return Vector(x * scalar, y * scalar, z * scalar);
+}
+
+Vector Vector::operator/(float scalar) const
+{
+    float invScalar = 1.0f / scalar;
+    return Vector(x * invScalar, y * invScalar, z * invScalar);
+}
+
+bool Vector::operator==(const Vector& other) const
+{
+    return x == other.x && y == other.y && z == other.z;
+}
+
+bool Vector::operator!=(const Vector& other) const
+{
+    return !(*this == other);
+}
+
+// Ramp methods
+
+bool Ramp::operator==(const Ramp& other) const
+{
+    return startPoint == other.startPoint && endPoint == other.endPoint && normal == other.normal &&
+           length == other.length && width == other.width &&
+           minExtents == other.minExtents && maxExtents == other.maxExtents;
+}
+
+// Matrix methods
+
+Matrix::Matrix(int rows, int cols)
+    : m_rows(rows)
+    , m_cols(cols)
+    , m_data(new float[rows * cols])
+{}
+
+Matrix::Matrix(const Matrix& other)
+    : m_rows(other.m_rows)
+    , m_cols(other.m_cols)
+    , m_data(new float[m_rows * m_cols])
+{
+    std::memcpy(m_data, other.m_data, m_rows * m_cols * sizeof(float));
+}
+
+Matrix::~Matrix()
+{
+    delete[] m_data;
+}
+
+Matrix Matrix::Identity(int size)
+{
+    Matrix result(size, size);
+    for (int i = 0; i < size; ++i)
+    {
+        result.m_data[i * size + i] = 1.0f;
+    }
+    return result;
+}
+
+Matrix Matrix::OuterProduct(const Vector& u, const Vector& v)
+{
+    Matrix result(3, 3);
+    result.m_data[0] = u.x * v.x;
+    result.m_data[1] = u.x * v.y;
+    result.m_data[2] = u.x * v.z;
+    result.m_data[3] = u.y * v.x;
+    result.m_data[4] = u.y * v.y;
+    result.m_data[5] = u.y * v.z;
+    result.m_data[6] = u.z * v.x;
+    result.m_data[7] = u.z * v.y;
+    result.m_data[8] = u.z * v.z;
+    return result;
+}
+
+Matrix& Matrix::operator=(const Matrix& other)
+{
+    if (this != &other)
+    {
+        delete[] m_data;
+        m_rows = other.m_rows;
+        m_cols = other.m_cols;
+        m_data = new float[m_rows * m_cols];
+        std::memcpy(m_data, other.m_data, m_rows * m_cols * sizeof(float));
+    }
+    return *this;
+}
+
+Matrix Matrix::operator+(const Matrix& other) const
+{
+    Matrix result(m_rows, m_cols);
+    for (int i = 0; i < m_rows * m_cols; ++i)
+    {
+        result.m_data[i] = m_data[i] + other.m_data[i];
+    }
+    return result;
+}
+
+Matrix Matrix::operator-(const Matrix& other) const
+{
+    Matrix result(m_rows, m_cols);
+    for (int i = 0; i < m_rows * m_cols; ++i)
+    {
+        result.m_data[i] = m_data[i] - other.m_data[i];
+    }
+    return result;
+}
+
+Matrix Matrix::operator*(const Matrix& other) const
+{
+    Matrix result(m_rows, other.m_cols);
+    for (int i = 0; i < m_rows; ++i)
+    {
+        for (int j = 0; j < other.m_cols; ++j)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < m_cols; ++k)
+            {
+                sum += m_data[i * m_cols + k] * other.m_data[k * other.m_cols + j];
+            }
+            result.m_data[i * other.m_cols + j] = sum;
+        }
+    }
+    return result;
+}
+
+Vector Matrix::operator*(const Vector& v) const
+{
+    Vector result;
+    result.x = m_data[0] * v.x + m_data[1] * v.y + m_data[2] * v.z;
+    result.y = m_data[3] * v.x + m_data[4] * v.y + m_data[5] * v.z;
+    result.z = m_data[6] * v.x + m_data[7] * v.y + m_data[8] * v.z;
+    return result;
+}
+
+int Matrix::Rows() const
+{
+    return m_rows;
+}
+
+int Matrix::Cols() const
+{
+    return m_cols;
+}
+
+// CBaseEntity methods
+
+CBaseEntity::CBaseEntity()
+    : m_KeyValues(nullptr)
+{}
+
+CBaseEntity::~CBaseEntity()
+{
+    if (m_KeyValues)
+    {
+        m_KeyValues->deleteThis();
+    }
+}
+
+void CBaseEntity::SetKeyValues(KeyValues* kvData)
+{
+    if (m_KeyValues)
+    {
+        m_KeyValues->deleteThis();
+    }
+    m_KeyValues = kvData;
+}
+
+KeyValues* CBaseEntity::GetKeyValues() const
+{
+    return m_KeyValues;
+}
+
+void CBaseEntity::SetAbsAngles(const QAngle& angles)
+{
+    m_AbsAngles = angles;
+}
+
+QAngle CBaseEntity::GetAbsAngles() const
+{
+    return m_AbsAngles;
+}
+
+Vector CBaseEntity::GetAbsOrigin() const
+{
+    return m_AbsOrigin;
+}
+
+void CBaseEntity::SetAbsOrigin(const Vector& origin)
+{
+    m_AbsOrigin = origin;
+}
+
+Vector CBaseEntity::GetForwardVector() const
+{
+    Vector forward;
+    AngleVectors(m_AbsAngles, &forward);
+    return forward;
+}
+
+Vector CBaseEntity::GetUpVector() const
+{
+    Vector up;
+    AngleVectors(m_AbsAngles, nullptr, nullptr, &up);
+    return up;
+}
+
+float CBaseEntity::GetValueForKey(const char* key) const
+{
+    KeyValues* kvData = GetKeyValues();
+    if (kvData)
+    {
+        return kvData->GetFloat(key, 0.0f);
+    }
+    return 0.0f;
 }
