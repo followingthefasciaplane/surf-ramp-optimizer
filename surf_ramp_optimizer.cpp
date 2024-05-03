@@ -1037,8 +1037,7 @@ void Optimization::UpdateInverseHessian(Matrix& inverseHessian, const Vector& di
     Matrix hessianUpdate = Matrix::OuterProduct(direction, direction) / direction.Dot(gradientDifference);
     Matrix gradientDifferenceMatrix = Matrix::OuterProduct(gradientDifference, gradientDifference);
 
-    inverseHessian = (Matrix::Identity(3) - hessianUpdate) * inverseHessian * (Matrix::Identity(3) - hessianUpdate)
-                     + hessianUpdate * (1.0f / gradientDifference.Dot(direction));
+    inverseHessian = (Matrix::Identity(3) - hessianUpdate) * inverseHessian * (Matrix::Identity(3) - hessianUpdate) + hessianUpdate * (1.0f / gradientDifference.Dot(direction));
 }
 
 // Pathfinding methods
@@ -1291,8 +1290,8 @@ bool Vector::operator!=(const Vector& other) const
 bool Ramp::operator==(const Ramp& other) const
 {
     return startPoint == other.startPoint && endPoint == other.endPoint && normal == other.normal &&
-           length == other.length && width == other.width &&
-           minExtents == other.minExtents && maxExtents == other.maxExtents;
+    length == other.length && width == other.width &&
+    minExtents == other.minExtents && maxExtents == other.maxExtents;
 }
 
 // Matrix methods
