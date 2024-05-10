@@ -254,13 +254,13 @@ CBrachistochroneOptimizer::CBrachistochroneOptimizer(const Ramp& ramp, CBaseEnti
     m_Gravity = gpGlobals->gravity;
 }
 
-std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickInterval) 
+std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, const Vector& startVel, float tickInterval)
 {
     float pathTime = NumericalMethods::CalculateBrachistochronePathTime(startPos, m_Ramp.endPoint, m_Gravity);
 
     if (pathTime <= 0.0f)
     {
-        return {}; 
+        return {};
     }
 
     const float timeStep = tickInterval;
@@ -272,7 +272,7 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
     m_OptimizedPath.clear();
     m_OptimizedPath.push_back(startPos);
 
-    for (float t = 0.0f; t <= pathTime; t += timeStep) 
+    for (float t = 0.0f; t <= pathTime; t += timeStep)
     {
         Vector pos = NumericalMethods::SolveBrachistochrone(startPos, m_Ramp.endPoint, t, m_Gravity, m_AirAccelerate);
         Vector accelDir = (pos - prevPos).Normalized();
@@ -290,14 +290,37 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
             currVel = currVel.Normalized() * maxVelocity;
         }
 
-        if (IsPathValid(pos))
+        trace_t trace;
+        TracePlayerBBox(prevPos, pos, PlayerSolidMask(), COLLISION_GROUP_PLAYER_MOVEMENT, trace);
+
+        if (trace.fraction == 1.0f)
         {
-            m_OptimizedPath.push_back(pos);
-            prevPos = pos;
+            if (IsPathValid(pos))
+            {
+                m_OptimizedPath.push_back(pos);
+                prevPos = pos;
+            }
+            else
+            {
+                break;
+            }
         }
         else
         {
-            break;
+            // collision detected, perform collision resolution
+            Vector move = pos - prevPos;
+            PerformFlyCollisionResolution(trace, move);
+            pos = trace.endpos;
+
+            if (IsPathValid(pos))
+            {
+                m_OptimizedPath.push_back(pos);
+                prevPos = pos;
+            }
+            else
+            {
+                break;
+            }
         }
     }
 
@@ -325,6 +348,57 @@ void CBrachistochroneOptimizer::Update(const Vector& playerPos, const Vector& pl
     }
 
     m_PlayerTracker.RecalibratePath(m_OptimizedPath, ramps, *this, tickInterval);
+}
+
+void CBrachistochroneOptimizer::PerformFlyCollisionResolution( trace_t& pm, Vector& move )
+{
+    Vector base;
+    float vel;
+    float backoff;
+
+    switch ( m_Player->GetMoveCollide() )
+    {
+        case MOVECOLLIDE_FLY_CUSTOM:
+            // do nothing; the velocity should have been modified by touch
+            break;
+
+        case MOVECOLLIDE_FLY_BOUNCE:
+        case MOVECOLLIDE_DEFAULT:
+            backoff = ( m_Player->GetMoveCollide() == MOVECOLLIDE_FLY_BOUNCE ) ? 2.0f - m_Player->m_surfaceFriction : 1.0f;
+            MathUtils::ClipVelocity( m_Player->m_vecVelocity, pm.plane.normal, m_Player->m_vecVelocity, backoff );
+            break;
+
+        default:
+            // Invalid collide type!
+            break;
+    }
+
+    // stop if on ground
+    if ( pm.plane.normal.z > 0.7f )
+    {
+        base.Init();
+        if ( m_Player->m_vecVelocity.z < m_Gravity * gpGlobals->frametime )
+        {
+            // we're rolling on the ground, add static friction
+            m_Player->SetGroundEntity( pm.m_pEnt );
+            m_Player->m_vecVelocity.z = 0.0f;
+        }
+
+        vel = m_Player->m_vecVelocity.Length2DSqr();
+
+        if ( vel < ( 30.0f * 30.0f ) || ( m_Player->GetMoveCollide() != MOVECOLLIDE_FLY_BOUNCE ) )
+        {
+            m_Player->SetGroundEntity( pm.m_pEnt );
+            m_Player->m_vecVelocity.Init();
+        }
+        else
+        {
+            move = m_Player->m_vecVelocity * ( 1.0f - pm.fraction ) * gpGlobals->frametime * 0.9f;
+            PushEntity( move, &pm );
+        }
+
+        m_Player->m_vecVelocity -= base;
+    }
 }
 
 bool CBrachistochroneOptimizer::IsPathValid(const Vector& point) const 
@@ -821,6 +895,23 @@ float MathUtils::SIMDDotProduct(const Vector& a, const Vector& b)
     result = _mm_hadd_ps(result, result);
 
     return _mm_cvtss_f32(result);
+}
+
+void MathUtils::ClipVelocity( Vector& in, Vector& normal, Vector& out, float overbounce )
+{
+    float backoff = DotProduct( in, normal ) * overbounce;
+
+    for ( int i = 0; i < 3; i++ )
+    {
+        float change = normal[i] * backoff;
+        out[i] = in[i] - change;
+    }
+
+    float adjust = DotProduct( out, normal );
+    if ( adjust < 0.0f )
+    {
+        out -= ( normal * adjust );
+    }
 }
 
 float MathUtils::SIMDLength(const Vector& v)
