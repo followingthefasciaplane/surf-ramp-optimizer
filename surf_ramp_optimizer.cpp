@@ -350,55 +350,31 @@ void CBrachistochroneOptimizer::Update(const Vector& playerPos, const Vector& pl
     m_PlayerTracker.RecalibratePath(m_OptimizedPath, ramps, *this, tickInterval);
 }
 
-void CBrachistochroneOptimizer::PerformFlyCollisionResolution( trace_t& pm, Vector& move )
+void CBrachistochroneOptimizer::PerformFlyCollisionResolution(trace_t& trace, Vector& move)
 {
-    Vector base;
-    float vel;
-    float backoff;
+    if (!m_Player) return;
 
-    switch ( m_Player->GetMoveCollide() )
-    {
-        case MOVECOLLIDE_FLY_CUSTOM:
-            // do nothing; the velocity should have been modified by touch
-            break;
+    Vector& velocity = m_Player->GetVelocity();
+    float dotProduct = DotProduct(velocity, trace.plane.normal);
 
-        case MOVECOLLIDE_FLY_BOUNCE:
-        case MOVECOLLIDE_DEFAULT:
-            backoff = ( m_Player->GetMoveCollide() == MOVECOLLIDE_FLY_BOUNCE ) ? 2.0f - m_Player->m_surfaceFriction : 1.0f;
-            MathUtils::ClipVelocity( m_Player->m_vecVelocity, pm.plane.normal, m_Player->m_vecVelocity, backoff );
-            break;
+    // Calculate the reflection direction of the velocity based on the collision normal
+    Vector reflectionDirection = velocity - 2 * dotProduct * trace.plane.normal;
 
-        default:
-            // Invalid collide type!
-            break;
+    // Ensure that the reflection doesn't result in the player going back into the collision surface
+    if (DotProduct(reflectionDirection, trace.plane.normal) > 0) {
+        // Maintain the original speed but change the direction to the reflection direction
+        velocity = reflectionDirection.Normalized() * velocity.Length();
+    } else {
+        // If the reflection direction is still pointing into the surface, just invert the velocity
+        // This might happen with glancing blows where the reflection calculation isn't enough
+        velocity = -velocity;
     }
 
-    // stop if on ground
-    if ( pm.plane.normal.z > 0.7f )
-    {
-        base.Init();
-        if ( m_Player->m_vecVelocity.z < m_Gravity * gpGlobals->frametime )
-        {
-            // we're rolling on the ground, add static friction
-            m_Player->SetGroundEntity( pm.m_pEnt );
-            m_Player->m_vecVelocity.z = 0.0f;
-        }
+    // Update the player's velocity with the new calculated value
+    m_Player->SetVelocity(velocity);
 
-        vel = m_Player->m_vecVelocity.Length2DSqr();
-
-        if ( vel < ( 30.0f * 30.0f ) || ( m_Player->GetMoveCollide() != MOVECOLLIDE_FLY_BOUNCE ) )
-        {
-            m_Player->SetGroundEntity( pm.m_pEnt );
-            m_Player->m_vecVelocity.Init();
-        }
-        else
-        {
-            move = m_Player->m_vecVelocity * ( 1.0f - pm.fraction ) * gpGlobals->frametime * 0.9f;
-            PushEntity( move, &pm );
-        }
-
-        m_Player->m_vecVelocity -= base;
-    }
+    // Optionally, handle any gameplay effects or animations that result from the collision
+    m_Player->OnCollision(trace.plane.normal);
 }
 
 bool CBrachistochroneOptimizer::IsPathValid(const Vector& point) const 
@@ -897,20 +873,18 @@ float MathUtils::SIMDDotProduct(const Vector& a, const Vector& b)
     return _mm_cvtss_f32(result);
 }
 
-void MathUtils::ClipVelocity( Vector& in, Vector& normal, Vector& out, float overbounce )
+void MathUtils::ClipVelocity(const Vector& in, const Vector& normal, Vector& out, float overbounce)
 {
-    float backoff = DotProduct( in, normal ) * overbounce;
+    float backoff = DotProduct(in, normal) * overbounce;
 
-    for ( int i = 0; i < 3; i++ )
-    {
-        float change = normal[i] * backoff;
-        out[i] = in[i] - change;
+    for (int i = 0; i < 3; i++) {
+        out[i] = in[i] - backoff * normal[i];
     }
 
-    float adjust = DotProduct( out, normal );
-    if ( adjust < 0.0f )
-    {
-        out -= ( normal * adjust );
+    // Ensure that the new velocity is not directing back into the collision plane
+    float adjust = DotProduct(out, normal);
+    if (adjust < 0.0f) {
+        out -= normal * adjust;
     }
 }
 
