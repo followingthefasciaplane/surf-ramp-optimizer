@@ -47,6 +47,7 @@ width "50"
 extents are calculated from ramp properties and used for collision detection
 
 TODO: implement functionality to search, view, edit ramp properties in `g_SurfRamps` as natives
+
 TODO: implement functionality to easily create and destroy surf_ramp entities as natives
 
 ## optimization process
@@ -59,7 +60,8 @@ the optimization process for a surf ramp and player follows these steps:
 4. the `Update` function is called periodically to adjust the path in real-time based on changing game conditions and player actions
 5. if the player deviates significantly from the optimized path, the `RecalibratePath` function of the `PlayerMovementTracking` class is called to find a new path using the A* algorithm.
 
-TODO: implement visualization with tempents or something in sourcepawb
+TODO: implement visualization with tempents or something in sourcepawn
+
 TODO: implement functionality to search, view and edit the optimized path data for a specific player and ramp as natives
 
 ## handling ramp collisions:
