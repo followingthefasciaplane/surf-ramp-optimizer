@@ -1,12 +1,19 @@
 #include "surf_ramp_optimizer.h"
-#include <immintrin.h>
-#include <limits>
-#include <igameevents.h>
+#include <iostream>
+#include <cmath>
 #include <algorithm>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+#include <cstring>
+#include <optional>
+#include <functional>
+#include <cassert>
+#include <immintrin.h>
+#include <limits>
+#include <igameevents.h>
+
 
 // Forward declarations
 class SurfRampOptimizer;
@@ -157,6 +164,7 @@ bool SurfRampOptimizer::QueryRunning(char* error, size_t maxlength)
 
 void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classname) 
 {
+    std::cout << "OnEntityCreated called with classname: " << classname << std::endl;
     if (!pEntity || !classname || std::string(classname) != "surf_ramp")
     {
         return;
@@ -172,6 +180,7 @@ void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classn
     }
 
     CollisionDetection::InsertRamp(&ramp);
+    std::cout << "Ramp created and optimizer added." << std::endl;
 }
 
 void SurfRampOptimizer::OnEntityDestroyed(CBaseEntity* pEntity) 
@@ -447,7 +456,7 @@ bool PlayerMovementTracking::HasDeviatedFromPath(const std::vector<Vector>& path
     }
 
     Vector playerPos = m_Positions.back();
-    float minDistance = std::numeric_limits<float>::max(); /////fix
+    float minDistance = std::numeric_limits<float>::max();
 
     for (const Vector& point : path)
     {
@@ -955,7 +964,7 @@ std::vector<Vector> Optimization::OptimizePathConjugateGradient(const std::vecto
                     direction = -gradients[j] + beta * direction;
                 }
 
-                float alpha = LineSearch(point, direction, ramp, gravity, airAccelerate);
+                float alpha = LineSearch(point, direction, ramp, gravity, airAccelerate).first;
                 point -= direction * alpha;
             }
         }
