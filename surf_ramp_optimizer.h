@@ -14,11 +14,11 @@ class Matrix;
 class Vector;
 class Ramp;
 
-namespace CollisionDetection;
-namespace NumericalMethods;
-namespace MathUtils;
-namespace Optimization;
-namespace Pathfinding;
+namespace CollisionDetection {}
+namespace NumericalMethods {}
+namespace MathUtils {}
+namespace Optimization {}
+namespace Pathfinding {}
 
 constexpr float MAX_PLAYER_DIST_TO_PATH = 50.0f;
 constexpr float GRADIENT_TOLERANCE = 1e-6f;

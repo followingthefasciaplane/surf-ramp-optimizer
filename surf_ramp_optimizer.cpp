@@ -1,19 +1,15 @@
 #include "surf_ramp_optimizer.h"
-#include <iostream>
 #include <cmath>
 #include <algorithm>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
-#include <cstring>
 #include <optional>
 #include <functional>
 #include <cassert>
 #include <immintrin.h>
 #include <limits>
-#include <igameevents.h>
-
 
 // Forward declarations
 class SurfRampOptimizer;
@@ -24,11 +20,11 @@ class Matrix;
 class Vector;
 class Ramp;
 class CBaseEntity;
-namespace CollisionDetection;
-namespace NumericalMethods;  
-namespace MathUtils;
-namespace Optimization;
-namespace Pathfinding;
+namespace CollisionDetection {}
+namespace NumericalMethods {}  
+namespace MathUtils {}
+namespace Optimization {}
+namespace Pathfinding {}
 
 // Global constants
 constexpr float MAX_PLAYER_DIST_TO_PATH = 50.0f;
@@ -164,7 +160,6 @@ bool SurfRampOptimizer::QueryRunning(char* error, size_t maxlength)
 
 void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classname) 
 {
-    std::cout << "OnEntityCreated called with classname: " << classname << std::endl;
     if (!pEntity || !classname || std::string(classname) != "surf_ramp")
     {
         return;
@@ -180,7 +175,6 @@ void SurfRampOptimizer::OnEntityCreated(CBaseEntity* pEntity, const char* classn
     }
 
     CollisionDetection::InsertRamp(&ramp);
-    std::cout << "Ramp created and optimizer added." << std::endl;
 }
 
 void SurfRampOptimizer::OnEntityDestroyed(CBaseEntity* pEntity) 
@@ -318,7 +312,7 @@ std::vector<Vector> CBrachistochroneOptimizer::Optimize(const Vector& startPos, 
         {
             // collision detected, perform collision resolution
             Vector move = pos - prevPos;
-            PerformFlyCollisionResolution(trace, move);
+            //PerformFlyCollisionResolution(trace, move);
             pos = trace.endpos;
 
             if (IsPathValid(pos))
@@ -1554,4 +1548,191 @@ float CBaseEntity::GetValueForKey(const char* key) const
         return kvData->GetFloat(key, 0.0f);
     }
     return 0.0f;
+}
+
+// Additional utility functions
+
+void AngleVectors(const QAngle& angles, Vector* forward, Vector* right, Vector* up)
+{
+    float sr, sp, sy, cr, cp, cy;
+
+    SinCos(DEG2RAD(angles[YAW]), &sy, &cy);
+    SinCos(DEG2RAD(angles[PITCH]), &sp, &cp);
+    SinCos(DEG2RAD(angles[ROLL]), &sr, &cr);
+
+    if (forward)
+    {
+        forward->x = cp * cy;
+        forward->y = cp * sy;
+        forward->z = -sp;
+    }
+
+    if (right)
+    {
+        right->x = (-1 * sr * sp * cy + -1 * cr * -sy);
+        right->y = (-1 * sr * sp * sy + -1 * cr * cy);
+        right->z = -1 * sr * cp;
+    }
+
+    if (up)
+    {
+        up->x = (cr * sp * cy + -sr * -sy);
+        up->y = (cr * sp * sy + -sr * cy);
+        up->z = cr * cp;
+    }
+}
+
+void SinCos(float radians, float* sine, float* cosine)
+{
+    *sine = sin(radians);
+    *cosine = cos(radians);
+}
+
+// SurfRampOptimizer additional methods
+
+void SurfRampOptimizer::Optimize(CBasePlayer* pPlayer, const Ramp& ramp)
+{
+    Vector playerPos = pPlayer->GetAbsOrigin();
+    Vector playerVel = pPlayer->GetAbsVelocity();
+    float tickInterval = gpGlobals->interval_per_tick;
+
+    auto optimizer = std::find_if(g_SurfRamps.begin(), g_SurfRamps.end(), [&](const auto& opt) {
+        return opt->GetRamp() == ramp;
+    });
+
+    if (optimizer != g_SurfRamps.end())
+    {
+        std::vector<Vector> optimizedPath = (*optimizer)->Optimize(playerPos, playerVel, tickInterval);
+        
+        // Apply the optimized path to the player
+        ApplyOptimizedPath(pPlayer, optimizedPath);
+    }
+}
+
+void SurfRampOptimizer::ApplyOptimizedPath(CBasePlayer* pPlayer, const std::vector<Vector>& path)
+{
+    if (path.empty())
+        return;
+
+    const int MAX_TICKS_TO_APPLY = 32; // Limit the number of ticks we apply at once
+    const float tickInterval = gpGlobals->interval_per_tick;
+
+    // Store the original position and velocity
+    Vector originalPosition = pPlayer->GetAbsOrigin();
+    Vector originalVelocity = pPlayer->GetAbsVelocity();
+
+    // Calculate the total distance of the path
+    float totalDistance = 0.0f;
+    for (size_t i = 1; i < path.size(); ++i)
+    {
+        totalDistance += (path[i] - path[i-1]).Length();
+    }
+
+    // Calculate the average speed along the path
+    float averageSpeed = totalDistance / (path.size() * tickInterval);
+
+    // Apply the path over multiple ticks
+    for (size_t i = 0; i < std::min(path.size() - 1, static_cast<size_t>(MAX_TICKS_TO_APPLY)); ++i)
+    {
+        Vector currentPos = path[i];
+        Vector nextPos = path[i + 1];
+        Vector direction = (nextPos - currentPos).Normalized();
+
+        // Calculate the velocity for this segment
+        Vector segmentVelocity = direction * averageSpeed;
+
+        // Apply gravity
+        segmentVelocity.z -= sv_gravity.GetFloat() * tickInterval * 0.5f;
+
+        // Check for collisions
+        trace_t trace;
+        UTIL_TraceHull(currentPos, nextPos, pPlayer->WorldAlignMins(), pPlayer->WorldAlignMaxs(), MASK_PLAYERSOLID, pPlayer, COLLISION_GROUP_PLAYER_MOVEMENT, &trace);
+
+        if (trace.fraction < 1.0f)
+        {
+            // Collision detected, adjust position and velocity
+            nextPos = trace.endpos;
+            segmentVelocity = MathUtils::ClipVelocity(segmentVelocity, trace.plane.normal, 1.0f);
+        }
+
+        // Set the player's position and velocity for this tick
+        pPlayer->SetAbsOrigin(nextPos);
+        pPlayer->SetAbsVelocity(segmentVelocity);
+
+        // Trigger any touch functions for entities the player is touching
+        pPlayer->PhysicsTouchTriggers();
+
+        // Allow other plugins or game logic to modify the player's state
+        g_pGameMovement->ProcessMovement(pPlayer, &mv);
+
+        // Check if the player has significantly deviated from the path
+        if ((pPlayer->GetAbsOrigin() - nextPos).LengthSqr() > 100.0f) // 10 units threshold
+        {
+            // Player has deviated, stop applying the path
+            break;
+        }
+    }
+
+    // After applying the path, check if the final position is valid
+    trace_t finalTrace;
+    UTIL_TraceHull(pPlayer->GetAbsOrigin(), pPlayer->GetAbsOrigin(), pPlayer->WorldAlignMins(), pPlayer->WorldAlignMaxs(), MASK_PLAYERSOLID, pPlayer, COLLISION_GROUP_PLAYER_MOVEMENT, &finalTrace);
+
+    if (finalTrace.startsolid || finalTrace.allsolid)
+    {
+        // The final position is invalid, revert to the original position and velocity
+        pPlayer->SetAbsOrigin(originalPosition);
+        pPlayer->SetAbsVelocity(originalVelocity);
+    }
+
+    // Ensure the player's eye position is updated
+    pPlayer->SetViewOffset(pPlayer->GetViewOffset());
+}
+
+void SurfRampOptimizer::FireOnStartTouchRampForward(CBaseEntity* pPlayer, edict_t* pRamp)
+{
+    if (g_fwdOnStartTouchRamp->GetFunctionCount() > 0)
+    {
+        g_fwdOnStartTouchRamp->PushCell(gamehelpers->EntityToBCompatRef(pPlayer));
+        g_fwdOnStartTouchRamp->PushCell(gamehelpers->IndexOfEdict(pRamp));
+        g_fwdOnStartTouchRamp->Execute(NULL);
+    }
+}
+
+// Main plugin info
+PLUGIN_EXPOSE(SurfRampOptimizer, g_SurfRampOptimizer);
+bool SurfRampOptimizer::SDK_OnLoad(char* error, size_t maxlength, bool late)
+{
+    sharesys->AddDependency(myself, "sdktools.ext", true, true);
+    
+    char conf_error[255] = "";
+    if (!gameconfs->LoadGameConfigFile("surf_ramp_optimizer", &g_pGameConf, conf_error, sizeof(conf_error)))
+    {
+        if (error)
+        {
+            snprintf(error, maxlength, "Could not read surf_ramp_optimizer.txt: %s", conf_error);
+        }
+        return false;
+    }
+    
+    CDetourManager::Init(g_pSM->GetScriptingEngine(), g_pGameConf);
+    
+    return SDK_OnLoad(error, maxlength, late);
+}
+
+void SurfRampOptimizer::SDK_OnUnload()
+{
+    gameconfs->CloseGameConfigFile(g_pGameConf);
+}
+
+bool SurfRampOptimizer::SDK_OnMetamodLoad(ISmmAPI* ismm, char* error, size_t maxlength, bool late)
+{
+    GET_V_IFACE_CURRENT(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
+    ConVar_Register(0, this);
+    
+    return true;
+}
+
+bool SurfRampOptimizer::RegisterConCommandBase(ConCommandBase* pCommand)
+{
+    return META_REGCVAR(pCommand);
 }
